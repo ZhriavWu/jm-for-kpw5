@@ -1,0 +1,14 @@
+# 模拟环境（gnueabihf）用 Kindle 官方工具链做链接器。
+#
+# 为什么不用 zigbuild：模拟环境必须产出「动态链接」的 ARM 二进制，才能用
+# LD_PRELOAD 把帧缓冲/触摸 shim 注进去（静态二进制没有动态链接器，注入不了）。
+# 而 zig 默认给 musl 做静态链接，所以模拟目标改走 kindlehf 工具链的 glibc。
+#
+# 需要先把工具链的 bin 目录加进 PATH：
+#   export PATH="$HOME/x-tools/arm-kindlehf-linux-gnueabihf/bin:$PATH"
+
+[target.armv7-unknown-linux-gnueabihf]
+linker = "arm-kindlehf-linux-gnueabihf-gcc"
+
+[net]
+git-fetch-with-cli = true

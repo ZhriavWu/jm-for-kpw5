@@ -1,0 +1,47 @@
+# slint-backend-kindle 0.7.1 —— **本项目 vendor 的一份副本**，不是原样拷贝。
+#
+# 为什么要 vendor：这个 crate 把 Framebuffer 和 refresh_full() 都设为私有，
+# 公开 API 里没有「强制全屏刷新」的入口。而 Kindle 的残影必须靠定期全刷来清，
+# 且必须是「用全刷**代替**这一帧的局部刷」—— 从应用层绕不过去（详见 PATCH.md）。
+#
+# 改动只有一处功能性的：src/refresh.rs（新增）+ src/platform.rs 和 src/lib.rs
+# 各几行接线。其余文件与上游逐字节一致，升级时可以直接比对。
+# 具体改了哪些、怎么重新套用，见同目录的 PATCH.md。
+#
+# 上游：https://github.com/sverrejb/slint-kindle-backend
+# 许可：MIT OR Apache-2.0（两个许可证文件都在本目录里）
+
+[package]
+name = "slint-backend-kindle"
+version = "0.7.1"
+edition = "2024"
+rust-version = "1.92"
+description = "Slint platform backend for Kindle E-ink devices (vendored + full-refresh patch)"
+authors = ["Sverre Johann Bjørke <sverrejb@gmail.com>"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/sverrejb/slint-kindle-backend"
+homepage = "https://github.com/sverrejb/slint-kindle-backend"
+keywords = ["slint", "kindle", "embedded", "eink", "framebuffer"]
+categories = ["embedded", "gui"]
+
+# 上游这里还有 [workspace] members = ["examples/*"]，vendor 副本里必须去掉：
+# 我们不带 examples（它们依赖一堆额外 crate），留着会让 cargo 去找不存在的成员。
+
+[lib]
+name = "slint_backend_kindle"
+path = "src/lib.rs"
+# 上游 lib.rs 顶部的用法示例是 no_run doctest，里面 include_bytes! 了
+# 他们仓库自己的 ui/MyFont.ttf —— vendor 副本里没有那些文件，doc 测试必然失败。
+# 关掉它，好让源码保持和上游逐字节一致（改动越少，将来重新套补丁越容易）。
+# 我们自己的单元测试不受影响。
+doctest = false
+
+[dependencies]
+slint = { version = "1.18", default-features = false, features = ["compat-1-2", "std", "renderer-software", "software-renderer-path"] }
+libc = "0.2"
+log = "0.4"
+# 上游注释：fontique / fontdb 是被 slint 间接拉进来的，它们的默认特性会链接
+# libfontconfig，而 musl 交叉编译的 sysroot 里没有 —— 所以在这里重新声明以剥掉。
+fontique = { version = "0.11", default-features = false, features = ["std", "fontconfig-dlopen"] }
+fontdb = { version = "0.24", default-features = false, features = ["std", "fs", "memmap"] }

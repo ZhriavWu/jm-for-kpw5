@@ -1,0 +1,1111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>JMcomic for kindle · UI 设计稿 v6（1236 × 1648 电子墨水）</title>
+<style>
+/* ============================================================
+   v6 改动（只动了输入法的候选词栏，其余沿用 v5）：
+   1) 候选词改成【横排一行】，照 Kindle 系统输入法
+   2) 两端各一个尖角翻页键：108 + 5×204 + 108 = 1236，正好铺满
+   3) 【高度恒定 142px】——有没有候选词都占一样高，避免整屏重排
+   4) 键盘去掉上边框（改由候选栏的下边框兼任），省 3px
+
+   —— v5 的规则继续有效 ——
+   · 【没有中/英模式键】输入框里的内容本身就是最终要搜的东西
+   · 打字母 = 英文；点了候选词才变汉字；不点就按字母原样搜
+   · 搜索页去掉独立顶栏：返回键 + 输入框合成一行，省下 128px 给结果列表
+
+   每个 .screen 内部 px = Kindle Paperwhite 5 物理像素，外层整体缩放。
+   ============================================================ */
+
+:root{
+  --g5:#555555; --g8:#888888; --g9:#999999; --g12:#cccccc;
+  --s:0.40;
+}
+
+*{margin:0;padding:0;box-sizing:border-box;
+  transition:none !important; animation:none !important;}
+
+body{
+  background:#3b3b3b; padding:34px 34px 90px;
+  font-family:"WenQuanYi Micro Hei","Noto Sans CJK SC","Microsoft YaHei","PingFang SC",sans-serif;
+}
+
+h1.page{color:#fff;font-size:22px;font-weight:700;margin-bottom:8px;letter-spacing:.5px;}
+p.page-sub{color:#b4b4b4;font-size:13.5px;line-height:1.8;max-width:1240px;margin-bottom:22px;}
+p.page-sub b{color:#fff;}
+
+.legend{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:34px;max-width:1500px;}
+.legend div{border:1px solid #7a7a7a;color:#cfcfcf;font-size:12.5px;line-height:1.6;padding:9px 13px;max-width:286px;}
+.legend b{color:#fff;display:block;margin-bottom:2px;}
+
+.swatches{display:flex;margin-bottom:38px;border:1px solid #7a7a7a;width:max-content;}
+.swatches span{width:84px;height:44px;display:flex;align-items:flex-end;justify-content:center;
+  font-size:10px;color:#999;padding-bottom:4px;border-right:1px solid #7a7a7a;}
+.swatches span:last-child{border-right:none;}
+
+.grid{display:flex;flex-wrap:wrap;gap:46px 38px;align-items:flex-start;}
+.item{width:calc(1236px * var(--s));}
+.item h2{color:#fff;font-size:15.5px;font-weight:700;margin:15px 0 7px;letter-spacing:.5px;}
+.item h2 em{font-style:normal;color:#8f8f8f;font-weight:400;font-size:12.5px;margin-left:8px;}
+.item p{color:#bdbdbd;font-size:12.5px;line-height:1.75;margin-bottom:6px;}
+.item p b{color:#eee;}
+.item p.warn{color:#e0c08a;}
+.item p.warn b{color:#ffd894;}
+
+.slot{width:calc(1236px * var(--s));height:calc(1648px * var(--s));
+  position:relative;overflow:hidden;background:#fff;
+  box-shadow:0 0 0 2px #000,0 12px 34px rgba(0,0,0,.5);}
+
+/* ============================================================
+   以下 = Kindle 屏幕内部，单位一律真机像素
+   ============================================================ */
+.screen{
+  position:absolute;top:0;left:0;width:1236px;height:1648px;
+  transform:scale(var(--s));transform-origin:0 0;
+  background:#fff;color:#000;overflow:hidden;
+  display:flex;flex-direction:column;font-size:34px;line-height:1.25;
+}
+
+.p60{padding-left:60px;padding-right:60px;}
+
+.bar{flex:0 0 88px;background:#000;color:#fff;display:flex;align-items:center;
+  justify-content:space-between;padding:0 40px;font-size:30px;letter-spacing:.5px;}
+.bar-btn{border:2px solid #fff;padding:8px 22px;font-size:28px;}
+
+.appbar{flex:0 0 128px;border-bottom:3px solid #000;display:flex;align-items:center;
+  gap:30px;padding:0 40px;}
+.appbar .btn{flex:0 0 200px;height:88px;font-size:32px;}
+.appbar-t{flex:1;font-size:40px;font-weight:700;text-align:center;}
+.appbar-r{flex:0 0 240px;text-align:right;font-size:30px;color:var(--g5);}
+
+.hd{flex:0 0 150px;padding:30px 60px 0;}
+.hd-t{font-size:56px;font-weight:700;letter-spacing:1px;}
+.hd-s{flex:0 0 76px;font-size:28px;color:var(--g5);padding-top:14px;}
+
+.sec-h{flex:0 0 72px;display:flex;align-items:center;font-size:32px;font-weight:700;}
+.sec-h span{margin-left:auto;font-size:28px;color:var(--g5);font-weight:400;}
+
+.btn{border:3px solid #000;background:#fff;color:#000;display:flex;
+  align-items:center;justify-content:center;font-size:34px;}
+.btn.off{border-color:var(--g9);color:var(--g9);}
+
+.chips{flex:0 0 130px;display:flex;align-items:center;gap:20px;padding:0 40px;}
+.chip{height:76px;border:3px solid #000;display:flex;align-items:center;padding:0 28px;font-size:30px;}
+.chip.on{background:#000;color:#fff;}
+
+.nav{flex:0 0 108px;border-top:3px solid #000;background:#fff;display:flex;}
+.nav-i{flex:1;display:flex;align-items:center;justify-content:center;
+  color:#000;border-right:2px solid var(--g8);}
+.nav-i:last-child{border-right:none;}
+.nav-i.on{background:#000;color:#fff;}
+
+.ic{width:66px;height:66px;display:block;
+  fill:none;stroke:currentColor;stroke-width:7;
+  stroke-linecap:square;stroke-linejoin:round;}
+.ic-s{width:42px;height:42px;display:block;fill:none;stroke:currentColor;stroke-width:9;
+  stroke-linecap:square;stroke-linejoin:round;}
+.ic-s.solid{fill:currentColor;}
+.ic-m{width:46px;height:46px;display:block;fill:none;stroke:currentColor;stroke-width:9;
+  stroke-linecap:square;stroke-linejoin:round;}
+.ic-m.solid{fill:currentColor;}
+
+.pager{flex:0 0 140px;border-top:3px solid #000;display:flex;align-items:center;}
+.pager .btn{flex:0 0 320px;height:104px;margin:0 24px;font-size:36px;}
+.pgind{flex:1;text-align:center;font-size:32px;color:var(--g5);}
+
+.list{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;}
+.lrow{flex:1 1 0;min-height:0;display:flex;align-items:center;gap:26px;
+  border-bottom:2px solid var(--g8);}
+.lrow:last-child{border-bottom:none;}
+.lthumb{flex:0 0 72px;height:96px;border:2px solid var(--g8);color:var(--g12);font-size:22px;
+  display:flex;align-items:center;justify-content:center;}
+.lname{flex:1;font-size:36px;overflow:hidden;white-space:nowrap;}
+.lmeta{font-size:28px;color:var(--g5);}
+.lmark{flex:0 0 46px;height:46px;display:flex;align-items:center;justify-content:center;color:#000;}
+
+.setwrap{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;padding-top:16px;}
+.srow{flex:1 1 0;min-height:0;display:flex;align-items:center;justify-content:space-between;
+  font-size:38px;border-bottom:2px solid var(--g8);}
+.srow .sv{font-size:31px;color:var(--g5);}
+.srow .sv b{color:#000;font-weight:400;}
+
+/* ============================================================
+   搜索页（v5 重做）
+   返回键 + 输入框同一行 → 省掉独立顶栏
+   ============================================================ */
+.searchbar{flex:0 0 176px;display:flex;align-items:center;gap:24px;padding:0 40px;}
+.searchbar .btn{flex:0 0 132px;height:112px;font-size:32px;}
+
+.field{flex:1;height:112px;border:3px solid #000;display:flex;align-items:center;
+  padding:0 28px;overflow:hidden;}
+.field-txt{font-size:44px;letter-spacing:3px;white-space:nowrap;overflow:hidden;}
+.caret{flex:0 0 3px;width:3px;height:54px;background:#000;margin-left:6px;}
+.field-will{margin-left:auto;padding-left:28px;font-size:27px;color:var(--g5);
+  letter-spacing:0;white-space:nowrap;flex:0 0 auto;}
+.field-will b{color:#000;font-weight:400;}
+
+/* ============================================================
+   候选词栏（v6：照 Kindle 系统输入法）
+   横向一行，两端各一个尖括号翻页键。高度恒定，永不变化。
+   108 + 5×204 + 108 = 1236 ✓
+   ============================================================ */
+.candbar{flex:0 0 142px;border-top:3px solid #000;border-bottom:3px solid #000;display:flex;}
+.cand-nav{flex:0 0 108px;display:flex;align-items:center;justify-content:center;color:#000;}
+.cand-nav.l{border-right:2px solid var(--g8);}
+.cand-nav.r{border-left:2px solid var(--g8);}
+.cand-nav.off{color:var(--g9);}
+.ch{width:56px;height:56px;display:block;fill:none;stroke:currentColor;stroke-width:10;
+  stroke-linecap:square;stroke-linejoin:round;}
+.cand-items{flex:1;display:flex;}
+.cand-i{flex:1;display:flex;align-items:center;justify-content:center;
+  font-size:44px;border-right:2px solid var(--g8);white-space:nowrap;}
+.cand-i:last-child{border-right:none;}
+.cand-i.on{background:#000;color:#fff;}
+.cand-i.sm{font-size:36px;}
+.cand-empty{flex:1;display:flex;align-items:center;justify-content:center;
+  text-align:center;font-size:29px;color:var(--g5);line-height:1.5;padding:0 40px;}
+.cand-empty b{color:#000;font-weight:400;}
+
+/* 尺寸图专用（只出现在设计稿第 ⑤ 屏） */
+.spec{flex:0 0 400px;padding:34px 60px 0;display:flex;flex-direction:column;gap:15px;}
+.spec-t{font-size:38px;font-weight:700;margin-bottom:4px;}
+.spec-l{font-size:28px;color:var(--g5);line-height:1.5;display:flex;gap:14px;}
+.spec-l i{font-style:normal;color:#000;font-weight:700;flex:0 0 42px;}
+.spec-l b{color:#000;font-weight:400;}
+.math{flex:0 0 84px;display:flex;align-items:center;padding:0 60px;
+  font-size:31px;color:#000;font-family:Consolas,monospace;}
+.states{flex:1 1 auto;min-height:0;padding:6px 60px 0;display:flex;flex-direction:column;gap:16px;}
+.states-t{font-size:30px;font-weight:700;}
+.states-r{display:flex;align-items:center;gap:22px;font-size:28px;color:var(--g5);line-height:1.4;}
+.states-r b{color:#000;font-weight:400;}
+.ch-sm{width:44px;height:44px;flex:0 0 44px;display:block;fill:none;stroke:currentColor;
+  stroke-width:10;stroke-linecap:square;stroke-linejoin:round;}
+
+.kb{flex:0 0 466px;padding:12px 60px;display:flex;
+  flex-direction:column;justify-content:center;gap:14px;}
+.kb-r{display:flex;justify-content:center;gap:12px;height:100px;}
+.k{width:100px;border:3px solid #000;display:flex;align-items:center;justify-content:center;font-size:40px;}
+.k.fn{font-size:30px;}
+.k.solid{background:#000;color:#fff;}
+
+.ph{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:20px;color:var(--g5);font-size:34px;text-align:center;line-height:1.7;}
+.ph b{color:#000;font-weight:400;}
+.ph span{font-size:28px;color:var(--g9);}
+
+/* ============ 主页 ============ */
+.about{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;padding:0 100px 60px;text-align:center;}
+.ab-icon{flex:0 0 300px;width:300px;height:300px;border:3px solid #000;
+  display:flex;align-items:center;justify-content:center;margin-bottom:52px;}
+.ab-ic{width:190px;height:190px;display:block;fill:none;stroke:#000;stroke-width:6;
+  stroke-linecap:square;stroke-linejoin:round;}
+.ab-name{font-size:74px;font-weight:700;letter-spacing:1px;line-height:1.2;}
+.ab-by{font-size:32px;color:var(--g5);margin-top:26px;line-height:1.7;}
+.ab-by b{color:#000;font-weight:400;}
+.ab-repo{margin-top:64px;border:3px solid #000;padding:34px 46px;width:100%;}
+.ab-repo-h{font-size:28px;color:var(--g5);margin-bottom:14px;}
+.ab-repo-u{font-size:36px;letter-spacing:1px;word-break:break-all;line-height:1.4;}
+.ab-btn{margin-top:56px;width:100%;height:170px;background:#000;color:#fff;
+  display:flex;align-items:center;justify-content:center;font-size:52px;letter-spacing:8px;}
+
+/* ============ 快速入门 ============ */
+.guide{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;padding:0 60px;}
+.gd-h{flex:0 0 132px;display:flex;align-items:flex-end;padding-bottom:22px;
+  border-bottom:3px solid #000;}
+.gd-h-t{font-size:48px;font-weight:700;}
+.gd-h-s{font-size:28px;color:var(--g5);margin-left:auto;padding-bottom:6px;}
+.steps{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;justify-content:space-evenly;}
+.step{display:flex;gap:30px;}
+.step-n{flex:0 0 76px;height:76px;background:#000;color:#fff;display:flex;
+  align-items:center;justify-content:center;font-size:40px;}
+.step-b{flex:1;}
+.step-t{font-size:38px;font-weight:700;line-height:1.3;}
+.step-d{font-size:29px;color:var(--g5);line-height:1.65;margin-top:10px;}
+.step-d b{color:#000;font-weight:400;}
+.code{margin-top:14px;border:2px solid var(--g8);padding:14px 22px;font-size:29px;
+  font-family:Consolas,monospace;color:#000;background:#fff;}
+.step-tag{display:inline-block;border:2px solid #000;font-size:24px;padding:2px 12px;
+  margin-left:12px;vertical-align:3px;font-weight:400;color:#000;}
+
+/* ============ 阅读器 ============ */
+.rfull{flex:1 1 auto;min-height:0;position:relative;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:20px;color:var(--g9);font-size:34px;line-height:1.6;text-align:center;}
+.rfull span{font-size:26px;color:var(--g12);}
+.rfull b{color:var(--g9);font-weight:400;font-size:30px;}
+.rfull .zone{position:absolute;border:2px dashed var(--g12);color:var(--g12);
+  font-size:24px;display:flex;align-items:center;justify-content:center;text-align:center;line-height:1.4;}
+
+.rwrap{flex:1 1 auto;min-height:0;position:relative;overflow:hidden;}
+.rbase{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:16px;color:var(--g9);font-size:32px;text-align:center;line-height:1.6;}
+.rbase span{font-size:25px;color:var(--g12);}
+.mpanel{position:absolute;left:0;right:0;bottom:0;background:#fff;border-top:3px solid #000;}
+.mp-h{height:96px;padding:0 50px;border-bottom:3px solid #000;display:flex;
+  align-items:center;justify-content:space-between;font-size:34px;font-weight:700;}
+.mp-h-r{font-size:29px;color:var(--g5);font-weight:400;}
+.mp-row{height:122px;padding:0 50px;border-bottom:2px solid var(--g8);display:flex;
+  align-items:center;justify-content:space-between;font-size:40px;}
+.mp-v{font-size:30px;color:var(--g5);display:flex;align-items:center;gap:16px;}
+.mp-v b{color:#000;font-weight:400;}
+.mp-row.two{padding:0;height:122px;}
+.mp-half{flex:1;display:flex;align-items:center;justify-content:center;font-size:40px;height:100%;}
+.mp-half:first-child{border-right:2px solid var(--g8);}
+.mp-row.close{background:#000;color:#fff;justify-content:center;font-size:38px;height:130px;border-bottom:none;}
+
+.hintpanel{flex:1 1 auto;min-height:0;padding:54px 60px 60px;display:flex;flex-direction:column;}
+.hint-t{font-size:58px;font-weight:700;}
+.hint-s{font-size:30px;color:var(--g5);margin-top:14px;line-height:1.6;}
+.hint-main{flex:1 1 auto;min-height:0;display:flex;align-items:center;gap:56px;padding:44px 0;}
+.diag{flex:0 0 300px;height:400px;border:3px solid #000;display:flex;}
+.dg-c{flex:1;border-right:2px dashed var(--g8);display:flex;align-items:center;
+  justify-content:center;font-size:26px;color:var(--g5);}
+.dg-c:last-child{border-right:none;}
+.dg-c-mid{flex-direction:column;justify-content:flex-end;}
+.dg-free{flex:1;}
+.dg-menu{width:100%;height:62%;border:2px dashed var(--g8);display:flex;
+  align-items:center;justify-content:center;font-size:24px;color:var(--g5);}
+.hint-list{flex:1;display:flex;flex-direction:column;gap:34px;}
+.hint-li{display:flex;flex-direction:column;gap:8px;}
+.hint-li b{font-size:40px;font-weight:700;}
+.hint-li span{font-size:28px;color:var(--g5);line-height:1.5;}
+.hint-btn{flex:0 0 150px;background:#000;color:#fff;display:flex;align-items:center;
+  justify-content:center;font-size:46px;letter-spacing:6px;}
+
+/* 状态页 */
+.st-body{flex:1 1 auto;min-height:0;padding:70px 60px 0;display:flex;flex-direction:column;gap:36px;}
+.st-t{font-size:64px;font-weight:700;}
+.st-p{font-size:34px;color:var(--g5);line-height:1.75;}
+.st-p b{color:#000;}
+.st-box{border:3px solid #000;}
+.st-box > div{height:96px;padding:0 34px;display:flex;align-items:center;
+  justify-content:space-between;font-size:32px;border-bottom:2px solid var(--g8);}
+.st-box > div:last-child{border-bottom:none;}
+.st-box span:last-child{color:var(--g5);}
+.st-btn{height:150px;background:#000;color:#fff;display:flex;align-items:center;
+  justify-content:center;font-size:46px;letter-spacing:4px;}
+.st-note{flex:0 0 360px;border-top:3px solid #000;padding:36px 60px;display:flex;flex-direction:column;gap:24px;justify-content:center;}
+.st-note-h{font-size:30px;color:var(--g5);line-height:1.6;}
+.ld{border:3px solid #000;height:130px;padding:0 34px;display:flex;align-items:center;justify-content:space-between;}
+.ld-t{font-size:34px;}
+.ld-q{display:flex;gap:14px;}
+.ld-q i{width:30px;height:30px;border:2px solid #000;display:block;}
+.ld-q i.f{background:#000;}
+</style>
+</head>
+<body>
+
+<!-- ============ SVG 图标 ============ -->
+<svg width="0" height="0" style="position:absolute;overflow:hidden" aria-hidden="true">
+  <symbol id="i-history" viewBox="0 0 100 100">
+    <path d="M52 22 A32 32 0 1 1 20 54"/>
+    <path d="M36 22 L56 11 L56 33 Z" fill="currentColor" stroke="none"/>
+    <path d="M52 34 V54 H70"/>
+  </symbol>
+  <symbol id="i-search" viewBox="0 0 100 100">
+    <circle cx="43" cy="43" r="25"/>
+    <path d="M61 61 L84 84" stroke-width="10"/>
+  </symbol>
+  <symbol id="i-home" viewBox="0 0 100 100">
+    <path d="M12 48 L50 16 L88 48"/>
+    <path d="M22 41 V86 H78 V41"/>
+    <path d="M40 86 V62 H60 V86"/>
+  </symbol>
+  <symbol id="i-star" viewBox="0 0 100 100">
+    <path d="M50 14 L60 38 L84 41 L66 57 L71 81 L50 69 L29 81 L34 57 L16 41 L40 38 Z"/>
+  </symbol>
+  <symbol id="i-settings" viewBox="0 0 100 100">
+    <path d="M10 28 H25 M55 28 H90"/>
+    <path d="M10 50 H45 M75 50 H90"/>
+    <path d="M10 72 H25 M55 72 H90"/>
+    <circle cx="40" cy="28" r="11"/>
+    <circle cx="60" cy="50" r="11"/>
+    <circle cx="40" cy="72" r="11"/>
+  </symbol>
+  <symbol id="i-book" viewBox="0 0 100 100">
+    <path d="M50 26 V86"/>
+    <path d="M50 26 C42 17 28 15 15 17 V79 C28 77 42 79 50 86"/>
+    <path d="M50 26 C58 17 72 15 85 17 V79 C72 77 58 79 50 86"/>
+  </symbol>
+  <!-- 候选词翻页（v6）：形状就是「往左/往右的尖角」 -->
+  <symbol id="i-prev" viewBox="0 0 100 100">
+    <path d="M64 20 L30 50 L64 80"/>
+  </symbol>
+  <symbol id="i-next" viewBox="0 0 100 100">
+    <path d="M36 20 L70 50 L36 80"/>
+  </symbol>
+</svg>
+
+<h1 class="page">JMcomic for kindle · 界面稿 v6（1:1 真机像素，Kindle Paperwhite 5 · 1236 × 1648）</h1>
+<p class="page-sub">
+每块白框 = 一整屏真机画面，内部数字就是真机像素，可以直接拿去写代码量。<br>
+<b>v6 只动了输入法的候选词栏，其余一律沿用 v5：</b>候选词从「2 行 × 6 个」改成<b>照 Kindle 系统输入法的横排一行</b>，两端各一个尖角翻页键（108 + 204×5 + 108 = 1236）。<br>
+规则不变：<b>输入框里的内容就是最终要搜的东西</b>——打字母＝英文，点了候选才变汉字。
+</p>
+
+<div class="legend">
+  <div><b>① 只有 16 级灰</b>全稿只用 #000 / #555 / #888 / #999 / #CCC / #FFF 六档，避开 238–255（会出色带）</div>
+  <div><b>② 没有颜色</b>分层只靠三样：反白、边框粗细、留白</div>
+  <div><b>③ 没有动效 / 没有 hover</b>选中状态必须是一块看得见的实心黑</div>
+  <div><b>④ 底线 2px，主线 3px</b>1px 的线在墨水屏上会被吃成断线</div>
+  <div><b>⑤ 没有滚动</b>列表一律分页，底部固定翻页条</div>
+  <div><b>⑥ 只有单击</b>可点区域 ≥ 100px（阅读器除外，见全屏方案）</div>
+  <div><b>⑦ 图标一律 SVG 画</b>不用 ✕ ▶ ⌫ 这类字符——字体缺字会掉成空白，SVG 不会</div>
+  <div><b>⑧ 不用浅灰底</b>#F5F5F5 之类会和背景糊住，分层改用黑框 + 纯白</div>
+  <div><b>⑨ 覆盖优于重排</b>弹菜单时底下的内容<b>一个像素都不动</b>，只重画被盖住的那块</div>
+  <div><b>⑩ 高度恒定</b>候选词栏永远 142px（不管有没有候选词），状态切换时不重排、不整屏闪</div>
+</div>
+
+<div class="swatches">
+  <span style="background:#000;color:#fff">#000</span>
+  <span style="background:#555">#555</span>
+  <span style="background:#888">#888</span>
+  <span style="background:#999">#999</span>
+  <span style="background:#ccc">#ccc</span>
+  <span style="background:#fff;color:#666">#fff</span>
+</div>
+
+<div class="grid">
+
+<!-- ==================== 1. 历史 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+    <div class="bar">
+      <span>服务器　已连接　192.168.1.7:8001</span>
+      <span class="bar-btn">重新连接</span>
+    </div>
+    <div class="hd" style="flex:0 0 150px;">
+      <div class="hd-t">历史记录</div>
+    </div>
+    <div class="hd-s" style="padding-left:60px;padding-right:60px;">上次同步 14:32 · 共 128 部 · 点任意一行继续看</div>
+    <div class="p60 list" style="padding-top:20px;">
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 A</div><div class="lmeta">第 12 话 · 8 / 24</div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 B</div><div class="lmeta">第 3 话 · 1 / 40</div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 C</div><div class="lmeta">第 7 话 · 15 / 32</div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 D</div><div class="lmeta">第 1 话 · 3 / 18</div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 E</div><div class="lmeta">第 22 话 · 40 / 44</div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 F</div><div class="lmeta">第 5 话 · 12 / 26</div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 G</div><div class="lmeta">第 9 话 · 2 / 30</div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 H</div><div class="lmeta">第 4 话 · 6 / 21</div></div>
+    </div>
+    <div class="pager">
+      <div class="btn off">上一页</div>
+      <div class="pgind">第 1 / 3 页</div>
+      <div class="btn">下一页</div>
+    </div>
+    <div class="nav">
+      <div class="nav-i on"><svg class="ic" viewBox="0 0 100 100"><use href="#i-history"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-search"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-home"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-star"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-settings"/></svg></div>
+    </div>
+  </div></div>
+  <h2>① 历史（首页）<em>底栏第 1 项</em></h2>
+  <p>一屏 8 行，整行 137px 高。顶部反白条显示服务器状态。底栏 108px，五项，图标 66px。</p>
+</div>
+
+<!-- ==================== 2. 搜索 · 刚打完字母 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+
+    <div class="searchbar">
+      <div class="btn">返回</div>
+      <div class="field">
+        <span class="field-txt">yuan shen</span>
+        <span class="caret"></span>
+        <span class="field-will">将搜索：<b>yuan shen</b></span>
+      </div>
+    </div>
+
+    <div class="ph">
+      输入完了，按键盘上的<b>「搜索」</b>
+      <span>上面的候选词不点，就直接搜 “yuan shen”</span>
+    </div>
+
+    <div class="candbar">
+      <div class="cand-nav l off"><svg class="ch" viewBox="0 0 100 100"><use href="#i-prev"/></svg></div>
+      <div class="cand-items">
+        <div class="cand-i">原神</div>
+        <div class="cand-i">元神</div>
+        <div class="cand-i">原审</div>
+        <div class="cand-i">原身</div>
+        <div class="cand-i sm">二氧化硫</div>
+      </div>
+      <div class="cand-nav r"><svg class="ch" viewBox="0 0 100 100"><use href="#i-next"/></svg></div>
+    </div>
+
+    <div class="kb">
+      <div class="kb-r">
+        <div class="k">q</div><div class="k">w</div><div class="k">e</div><div class="k">r</div><div class="k">t</div>
+        <div class="k">y</div><div class="k">u</div><div class="k">i</div><div class="k">o</div><div class="k">p</div>
+      </div>
+      <div class="kb-r">
+        <div class="k">a</div><div class="k">s</div><div class="k">d</div><div class="k">f</div><div class="k">g</div>
+        <div class="k">h</div><div class="k">j</div><div class="k">k</div><div class="k">l</div>
+      </div>
+      <div class="kb-r">
+        <div class="k">z</div><div class="k">x</div><div class="k">c</div><div class="k">v</div><div class="k">b</div>
+        <div class="k">n</div><div class="k">m</div>
+        <div class="k fn" style="width:168px;">删除</div>
+      </div>
+      <div class="kb-r">
+        <div class="k fn" style="width:168px;">符号</div>
+        <div class="k fn" style="width:320px;">空格</div>
+        <div class="k fn solid" style="width:256px;">搜索</div>
+        <div class="k fn" style="width:168px;">收起</div>
+      </div>
+    </div>
+
+    <div class="nav">
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-history"/></svg></div>
+      <div class="nav-i on"><svg class="ic" viewBox="0 0 100 100"><use href="#i-search"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-home"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-star"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-settings"/></svg></div>
+    </div>
+
+  </div></div>
+  <h2>② 打完了字母，还没选字<em>v6：候选栏照 Kindle 系统输入法</em></h2>
+  <p class="warn"><b>候选词改成横排一行了</b>，两端各一个尖角翻页键，和 Kindle 自带输入法一个样子。<br>
+     一屏放 <b>5 个</b>（108 + 5×204 + 108 = 1236，正好铺满）。左边那个尖角现在是<b>灰的</b>——已经在第一页了，没得往回翻。</p>
+  <p>打进去的是 <b>yuan shen</b>，那它就是英文。<b>输入框右边「将搜索：yuan shen」直接写明了这一点</b>，不用猜。<br>
+     候选词<b>不点就跟你没关系</b>，按「搜索」＝搜 "yuan shen"。<b>不点也不会消失、不会变矮</b>，位置一直在这儿。</p>
+</div>
+
+<!-- ==================== 3. 搜索 · 选了候选词 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+
+    <div class="searchbar">
+      <div class="btn">返回</div>
+      <div class="field">
+        <span class="field-txt">原神</span>
+        <span class="caret"></span>
+        <span class="field-will">将搜索：<b>原神</b></span>
+      </div>
+    </div>
+
+    <div class="p60 sec-h">
+      搜索结果
+      <span>共 4 条 · 第 1 / 1 页</span>
+    </div>
+
+    <div class="p60 list">
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 01</div><div class="lmeta">24 话</div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 02</div><div class="lmeta">18 话</div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 03</div><div class="lmeta">32 话</div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 04</div><div class="lmeta">9 话</div></div>
+    </div>
+
+    <div class="candbar">
+      <div class="cand-nav l off"><svg class="ch" viewBox="0 0 100 100"><use href="#i-prev"/></svg></div>
+      <div class="cand-items">
+        <div class="cand-i">原神</div>
+        <div class="cand-i">元神</div>
+        <div class="cand-i">原审</div>
+        <div class="cand-i">原身</div>
+        <div class="cand-i sm">二氧化硫</div>
+      </div>
+      <div class="cand-nav r"><svg class="ch" viewBox="0 0 100 100"><use href="#i-next"/></svg></div>
+    </div>
+
+    <div class="kb">
+      <div class="kb-r">
+        <div class="k">q</div><div class="k">w</div><div class="k">e</div><div class="k">r</div><div class="k">t</div>
+        <div class="k">y</div><div class="k">u</div><div class="k">i</div><div class="k">o</div><div class="k">p</div>
+      </div>
+      <div class="kb-r">
+        <div class="k">a</div><div class="k">s</div><div class="k">d</div><div class="k">f</div><div class="k">g</div>
+        <div class="k">h</div><div class="k">j</div><div class="k">k</div><div class="k">l</div>
+      </div>
+      <div class="kb-r">
+        <div class="k">z</div><div class="k">x</div><div class="k">c</div><div class="k">v</div><div class="k">b</div>
+        <div class="k">n</div><div class="k">m</div>
+        <div class="k fn" style="width:168px;">删除</div>
+      </div>
+      <div class="kb-r">
+        <div class="k fn" style="width:168px;">符号</div>
+        <div class="k fn" style="width:320px;">空格</div>
+        <div class="k fn solid" style="width:256px;">搜索</div>
+        <div class="k fn" style="width:168px;">收起</div>
+      </div>
+    </div>
+
+    <div class="nav">
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-history"/></svg></div>
+      <div class="nav-i on"><svg class="ic" viewBox="0 0 100 100"><use href="#i-search"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-home"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-star"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-settings"/></svg></div>
+    </div>
+
+  </div></div>
+  <h2>③ 点了候选词「原神」<em>字母变成了汉字</em></h2>
+  <p>点候选词的瞬间，输入框里的 <b>yuan shen 被替换成「原神」</b>，右边的提示同步变成「将搜索：<b>原神</b>」，结果列表出来。<br>
+     <b>整屏只有输入框 + 提示 + 列表在变，候选栏和键盘位置一个像素都没动</b>——因为候选区高度恒定（规则⑩），不会重排。</p>
+  <p class="warn"><b>要撤销怎么办？</b>按「删除」键：<b>「原神」两个字是一次删掉、退回成 yuan shen 的</b>，不是一个个拆。这样误选了不用重打。<br>
+     再点另一个候选词，就是直接换成那个词——不用先删。</p>
+  <p>混着打也行：先选「原神」，再打空格、打字母，会接着显示新的候选。所以「原神 完整版」这种中英混着的搜索是可以的。</p>
+</div>
+
+<!-- ==================== 4. 搜索 · 不是拼音 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+
+    <div class="searchbar">
+      <div class="btn">返回</div>
+      <div class="field">
+        <span class="field-txt">sakura</span>
+        <span class="caret"></span>
+        <span class="field-will">将搜索：<b>sakura</b></span>
+      </div>
+    </div>
+
+    <div class="ph">
+      输入完了，按键盘上的<b>「搜索」</b>
+      <span>这次没有候选词可点，直接搜 “sakura”</span>
+    </div>
+
+    <div class="candbar">
+      <div class="cand-nav l off"><svg class="ch" viewBox="0 0 100 100"><use href="#i-prev"/></svg></div>
+      <div class="cand-empty">
+        这几个字母拼不出拼音组合，所以<b>没有候选词</b>。直接点「搜索」就是按 <b>sakura</b> 原文搜。
+      </div>
+      <div class="cand-nav r off"><svg class="ch" viewBox="0 0 100 100"><use href="#i-next"/></svg></div>
+    </div>
+
+    <div class="kb">
+      <div class="kb-r">
+        <div class="k">q</div><div class="k">w</div><div class="k">e</div><div class="k">r</div><div class="k">t</div>
+        <div class="k">y</div><div class="k">u</div><div class="k">i</div><div class="k">o</div><div class="k">p</div>
+      </div>
+      <div class="kb-r">
+        <div class="k">a</div><div class="k">s</div><div class="k">d</div><div class="k">f</div><div class="k">g</div>
+        <div class="k">h</div><div class="k">j</div><div class="k">k</div><div class="k">l</div>
+      </div>
+      <div class="kb-r">
+        <div class="k">z</div><div class="k">x</div><div class="k">c</div><div class="k">v</div><div class="k">b</div>
+        <div class="k">n</div><div class="k">m</div>
+        <div class="k fn" style="width:168px;">删除</div>
+      </div>
+      <div class="kb-r">
+        <div class="k fn" style="width:168px;">符号</div>
+        <div class="k fn" style="width:320px;">空格</div>
+        <div class="k fn solid" style="width:256px;">搜索</div>
+        <div class="k fn" style="width:168px;">收起</div>
+      </div>
+    </div>
+
+    <div class="nav">
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-history"/></svg></div>
+      <div class="nav-i on"><svg class="ic" viewBox="0 0 100 100"><use href="#i-search"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-home"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-star"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-settings"/></svg></div>
+    </div>
+
+  </div></div>
+  <h2>④ 打的不是拼音<em>没有候选，直接搜</em></h2>
+  <p>这份拼音表里 <b>sakura</b> 切不出合法的音节组合，所以候选区是空的——但它<b>不会消失、也没变矮</b>，只是换成一句说明。<b>布局纹丝不动。</b><br>
+     这就是你说的「不选候选词直接搜索的话，它就是英文」，一个字都没多。</p>
+  <p>同一套逻辑也顺便解决了「我要搜一个拼音表里没有的词」：直接搜，照样能搜到。</p>
+</div>
+
+<!-- ==================== 5. 候选词栏尺寸图 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+
+    <div class="searchbar">
+      <div class="btn">返回</div>
+      <div class="field">
+        <span class="field-txt">yuan</span>
+        <span class="caret"></span>
+        <span class="field-will">将搜索：<b>yuan</b></span>
+      </div>
+    </div>
+
+    <div class="spec">
+      <div class="spec-t">候选词栏 · 尺寸</div>
+      <div class="spec-l"><i>①</i><span>整条高 <b>142px</b>：上下各一条 3px 黑线 + 中间 136px</span></div>
+      <div class="spec-l"><i>②</i><span>翻页键 <b>108 × 142px</b>，左右各一个，和候选格一样高</span></div>
+      <div class="spec-l"><i>③</i><span>键里的尖角 <b>56 × 56px</b>，描边 10（缩到实机约 5.6px）</span></div>
+      <div class="spec-l"><i>④</i><span>候选格 <b>204 × 142px</b>，一屏放 <b>5 个</b></span></div>
+      <div class="spec-l"><i>⑤</i><span>格间竖线 <b>2px</b>；字号 <b>44px</b>，5 字以上自动降到 36px</span></div>
+    </div>
+
+    <div class="candbar">
+      <div class="cand-nav l"><svg class="ch" viewBox="0 0 100 100"><use href="#i-prev"/></svg></div>
+      <div class="cand-items">
+        <div class="cand-i">原来</div>
+        <div class="cand-i">原因</div>
+        <div class="cand-i">原理</div>
+        <div class="cand-i">圆形</div>
+        <div class="cand-i">愿望</div>
+      </div>
+      <div class="cand-nav r"><svg class="ch" viewBox="0 0 100 100"><use href="#i-next"/></svg></div>
+    </div>
+
+    <div class="math">108 + 204 × 5 + 108 = 1236　正好铺满屏宽</div>
+
+    <div class="states">
+      <div class="states-t">翻页键的两种样子</div>
+      <div class="states-r">
+        <svg class="ch-sm" viewBox="0 0 100 100" style="color:#999"><use href="#i-prev"/></svg>
+        <span><b>灰的</b>：已经在第一页（或最后一页），没得翻了，点了没反应</span>
+      </div>
+      <div class="states-r">
+        <svg class="ch-sm" viewBox="0 0 100 100"><use href="#i-next"/></svg>
+        <span><b>黑的</b>：后面还有候选词，点一下翻到下一批</span>
+      </div>
+    </div>
+
+    <div class="kb">
+      <div class="kb-r">
+        <div class="k">q</div><div class="k">w</div><div class="k">e</div><div class="k">r</div><div class="k">t</div>
+        <div class="k">y</div><div class="k">u</div><div class="k">i</div><div class="k">o</div><div class="k">p</div>
+      </div>
+      <div class="kb-r">
+        <div class="k">a</div><div class="k">s</div><div class="k">d</div><div class="k">f</div><div class="k">g</div>
+        <div class="k">h</div><div class="k">j</div><div class="k">k</div><div class="k">l</div>
+      </div>
+      <div class="kb-r">
+        <div class="k">z</div><div class="k">x</div><div class="k">c</div><div class="k">v</div><div class="k">b</div>
+        <div class="k">n</div><div class="k">m</div>
+        <div class="k fn" style="width:168px;">删除</div>
+      </div>
+      <div class="kb-r">
+        <div class="k fn" style="width:168px;">符号</div>
+        <div class="k fn" style="width:320px;">空格</div>
+        <div class="k fn solid" style="width:256px;">搜索</div>
+        <div class="k fn" style="width:168px;">收起</div>
+      </div>
+    </div>
+
+    <div class="nav">
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-history"/></svg></div>
+      <div class="nav-i on"><svg class="ic" viewBox="0 0 100 100"><use href="#i-search"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-home"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-star"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-settings"/></svg></div>
+    </div>
+
+  </div></div>
+  <h2>⑤ 候选词栏尺寸图<em>就照这一屏做</em></h2>
+  <p>整条横向铺满：<b>翻页键 108 + 候选格 204 × 5 + 翻页键 108 = 1236</b>，一格不剩、一格不挤。<br>
+     翻页键做得和候选格一样高，是因为<b>单击需要大目标</b>——108 × 142px 是很舒服的落点，不会点歪。</p>
+  <p class="warn">尖角用 SVG 画，<b>不用 &lt; &gt; 这两个字符</b>：一来它们在大字号下又细又长，二来字体缺字会直接掉成空白。SVG 描边 10，缩到实机约 5.6px，和 44px 的文字笔画一个量级。</p>
+  <p><b>翻页键的灰/黑是唯一的状态提示</b>：灰 = 到头了，黑 = 还有。不做页码、不做小圆点 —— 墨水屏上那些东西看不清。</p>
+</div>
+
+<!-- ==================== 6. 主页 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+    <div class="about">
+      <div class="ab-icon">
+        <svg class="ab-ic" viewBox="0 0 100 100"><use href="#i-book"/></svg>
+      </div>
+      <div class="ab-name">JMcomic<br>for kindle</div>
+      <div class="ab-by">作者　<b>（这里填你的名字）</b></div>
+      <div class="ab-repo">
+        <div class="ab-repo-h">开源地址</div>
+        <div class="ab-repo-u">github.com/你的用户名/jmcomic-for-kindle</div>
+      </div>
+      <div class="ab-btn">快速入门</div>
+    </div>
+    <div class="nav">
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-history"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-search"/></svg></div>
+      <div class="nav-i on"><svg class="ic" viewBox="0 0 100 100"><use href="#i-home"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-star"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-settings"/></svg></div>
+    </div>
+  </div></div>
+  <h2>⑥ 主页<em>图标 · 名字 · 作者 · 开源地址 · 快速入门</em></h2>
+  <p>就这五样，其余全在设置第 2 页。<b>作者名和开源地址还是占位符，等你给。</b></p>
+</div>
+
+<!-- ==================== 7. 快速入门 1 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+    <div class="guide">
+      <div class="gd-h">
+        <div class="gd-h-t">快速入门（一）先让它跑起来</div>
+        <div class="gd-h-s">第 1 / 2 页</div>
+      </div>
+      <div class="steps">
+        <div class="step">
+          <div class="step-n">1</div>
+          <div class="step-b">
+            <div class="step-t">在电脑上启动服务端<span class="step-tag">必须先做</span></div>
+            <div class="step-d">打开命令行，运行：</div>
+            <div class="code">python jm_kindle_raw.py</div>
+            <div class="step-d">窗口里出现 <b>Listening ... 8001</b> 就说明起来了，<b>别关这个窗口</b>。<br>这一步不做，Kindle 上所有按钮点了都没反应。</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-n">2</div>
+          <div class="step-b">
+            <div class="step-t">确认 Kindle 和电脑在同一个 Wi-Fi</div>
+            <div class="step-d">两边连同一个路由器就行，<b>不需要插线</b>。<br>电脑的 IP 这样查：按 Win+R 输 <b>cmd</b>，再输 <b>ipconfig</b>，找「IPv4 地址」。</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-n">3</div>
+          <div class="step-b">
+            <div class="step-t">回首页，看最上面那条黑条</div>
+            <div class="step-d">写「<b>服务器 已连接</b>」＝一切都好，可以直接用了。<br>写「<b>服务器 未连接</b>」＝点黑条右边的「重新连接」；还不行就去设置里手填地址。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="pager">
+      <div class="btn off">上一页</div>
+      <div class="pgind">第 1 / 2 页</div>
+      <div class="btn">下一页</div>
+    </div>
+    <div class="nav">
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-history"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-search"/></svg></div>
+      <div class="nav-i on"><svg class="ic" viewBox="0 0 100 100"><use href="#i-home"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-star"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-settings"/></svg></div>
+    </div>
+  </div></div>
+  <h2>⑦ 快速入门 · 第 1 页<em>三步跑起来</em></h2>
+  <p>新手最常见的失败就是忘了开服务端，然后以为软件坏了。所以第 1 步挂了「必须先做」的标签，命令行那行还用等宽字体单独框起来。</p>
+</div>
+
+<!-- ==================== 8. 快速入门 2 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+    <div class="guide">
+      <div class="gd-h">
+        <div class="gd-h-t">快速入门（二）怎么看漫画</div>
+        <div class="gd-h-s">第 2 / 2 页</div>
+      </div>
+      <div class="steps">
+        <div class="step">
+          <div class="step-n">4</div>
+          <div class="step-b">
+            <div class="step-t">找漫画</div>
+            <div class="step-d">底部点<b>放大镜</b>：敲字母 → 想搜中文就点上面的候选词，不想就按「搜索」。<br>或者点<b>钟表</b>（历史），接着上次看过的继续。</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-n">5</div>
+          <div class="step-b">
+            <div class="step-t">挑一话开始看</div>
+            <div class="step-d">点作品 → 出现章节列表 → <b>点某一话</b>就进阅读器了。</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-n">6</div>
+          <div class="step-b">
+            <div class="step-t">阅读器里怎么操作</div>
+            <div class="step-d">屏幕上没有按钮，全靠点位置：<br>
+              · 点画面<b>左边</b> ＝ 上一页<br>
+              · 点画面<b>右边</b> ＝ 下一页<br>
+              · 点画面<b>中间偏下</b> ＝ 打开菜单（跳页 · 章节 · 收藏 · 退出阅读）</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-n">7</div>
+          <div class="step-b">
+            <div class="step-t">觉得残影重怎么办</div>
+            <div class="step-d">阅读菜单 → <b>全屏刷新</b> → 选「每 5 页」。<br>另外记住：墨水屏每翻一页要等 <b>1–3 秒</b>，还会闪一下，这是正常的，不是卡住了。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="pager">
+      <div class="btn">上一页</div>
+      <div class="pgind">第 2 / 2 页</div>
+      <div class="btn off">下一页</div>
+    </div>
+    <div class="nav">
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-history"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-search"/></svg></div>
+      <div class="nav-i on"><svg class="ic" viewBox="0 0 100 100"><use href="#i-home"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-star"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-settings"/></svg></div>
+    </div>
+  </div></div>
+  <h2>⑧ 快速入门 · 第 2 页<em>四步看漫画</em></h2>
+  <p>第 4 步已经改成新输入法的说法：「想搜中文就点候选词，不想就按搜索」。<br>
+     第 6 步把阅读器热区直接写进说明书——全屏方案最怕「我不知道点哪」，这页必须说清楚。</p>
+</div>
+
+<!-- ==================== 9. 收藏 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+    <div class="appbar">
+      <div class="btn">返回</div>
+      <div class="appbar-t">收藏</div>
+      <div class="appbar-r">共 17 部</div>
+    </div>
+    <div class="chips">
+      <span class="chip on">收藏的作品</span>
+      <span class="chip">收藏的单话</span>
+    </div>
+    <div class="p60 list">
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 A</div><div class="lmeta">24 话</div><div class="lmark"><svg class="ic-s solid" viewBox="0 0 100 100"><use href="#i-star"/></svg></div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 B</div><div class="lmeta">18 话</div><div class="lmark"><svg class="ic-s solid" viewBox="0 0 100 100"><use href="#i-star"/></svg></div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 C</div><div class="lmeta">32 话</div><div class="lmark"><svg class="ic-s solid" viewBox="0 0 100 100"><use href="#i-star"/></svg></div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 D</div><div class="lmeta">9 话</div><div class="lmark"><svg class="ic-s solid" viewBox="0 0 100 100"><use href="#i-star"/></svg></div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 E</div><div class="lmeta">41 话</div><div class="lmark"><svg class="ic-s solid" viewBox="0 0 100 100"><use href="#i-star"/></svg></div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 F</div><div class="lmeta">12 话</div><div class="lmark"><svg class="ic-s solid" viewBox="0 0 100 100"><use href="#i-star"/></svg></div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 G</div><div class="lmeta">27 话</div><div class="lmark"><svg class="ic-s solid" viewBox="0 0 100 100"><use href="#i-star"/></svg></div></div>
+      <div class="lrow"><div class="lthumb">图</div><div class="lname">作品名 H</div><div class="lmeta">6 话</div><div class="lmark"><svg class="ic-s solid" viewBox="0 0 100 100"><use href="#i-star"/></svg></div></div>
+    </div>
+    <div class="pager">
+      <div class="btn off">上一页</div>
+      <div class="pgind">第 1 / 3 页</div>
+      <div class="btn">下一页</div>
+    </div>
+    <div class="nav">
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-history"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-search"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-home"/></svg></div>
+      <div class="nav-i on"><svg class="ic" viewBox="0 0 100 100"><use href="#i-star"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-settings"/></svg></div>
+    </div>
+  </div></div>
+  <h2>⑨ 收藏<em>列表里全是实心黑星</em></h2>
+  <p>这一页装的都是收藏过的东西，所以全是实心星。<b>点星＝取消收藏，点行本身＝进作品。</b></p>
+</div>
+
+<!-- ==================== 10. 设置 1 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+    <div class="appbar">
+      <div class="btn">返回</div>
+      <div class="appbar-t">设置</div>
+      <div class="appbar-r">第 1 / 2 页</div>
+    </div>
+    <div class="setwrap p60">
+      <div class="sec-h">服务器</div>
+      <div class="srow"><span>地址</span><span class="sv">192.168.1.7:8001</span></div>
+      <div class="srow"><span>连接状态</span><span class="sv">已连接 · 点此重测</span></div>
+
+      <div class="sec-h">阅读</div>
+      <div class="srow"><span>全屏刷新</span><span class="sv"><b>每 5 页</b>　点此修改</span></div>
+      <div class="srow"><span>翻页热区</span><span class="sv">左中右 三等分</span></div>
+      <div class="srow"><span>图片格式</span><span class="sv">原图 webp</span></div>
+      <div class="srow"><span>候选词每页</span><span class="sv">5 个</span></div>
+
+      <div class="sec-h">存储</div>
+      <div class="srow"><span>下载缓存</span><span class="sv">已用 128 MB　点此清理</span></div>
+    </div>
+    <div class="pager">
+      <div class="btn off">上一页</div>
+      <div class="pgind">第 1 / 2 页</div>
+      <div class="btn">下一页</div>
+    </div>
+    <div class="nav">
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-history"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-search"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-home"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-star"/></svg></div>
+      <div class="nav-i on"><svg class="ic" viewBox="0 0 100 100"><use href="#i-settings"/></svg></div>
+    </div>
+  </div></div>
+  <h2>⑩ 设置 · 第 1 页<em>「输入法默认」那行删了</em></h2>
+  <p>v4 里有一行「输入法默认：拼音 / 英文」——<b>现在没这个概念了，删掉</b>，换成「候选词每页：<b>5 个</b>」（v6 从 12 改成 5，因为候选栏改成横排一行了），这个是真有用的——对应代码里的 <b>ime::PAGE</b>，改这里必须和 UI 同步改。<br>
+     其余照旧：每行右边直接写当前值，要输数字的就在这一行上弹小键盘，不做二级页面。</p>
+</div>
+
+<!-- ==================== 11. 设置 2 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+    <div class="appbar">
+      <div class="btn">返回</div>
+      <div class="appbar-t">设置 · 关于</div>
+      <div class="appbar-r">第 2 / 2 页</div>
+    </div>
+    <div class="setwrap p60">
+      <div class="sec-h">存储与诊断</div>
+      <div class="srow"><span>日志级别</span><span class="sv">普通</span></div>
+      <div class="srow"><span>检查更新</span><span class="sv">当前 1.0</span></div>
+
+      <div class="sec-h">关于</div>
+      <div class="srow"><span>版本</span><span class="sv">1.0</span></div>
+      <div class="srow"><span>设备</span><span class="sv">Paperwhite 5 · 1236 × 1648</span></div>
+      <div class="srow"><span>服务端</span><span class="sv">jm_kindle_raw.py · 8001</span></div>
+      <div class="srow"><span>拼音词条</span><span class="sv">38,998 条</span></div>
+      <div class="srow"><span>作者</span><span class="sv">（这里填你的名字）</span></div>
+      <div class="srow"><span>开源地址</span><span class="sv">github.com/…</span></div>
+    </div>
+    <div class="pager">
+      <div class="btn">上一页</div>
+      <div class="pgind">第 2 / 2 页</div>
+      <div class="btn off">下一页</div>
+    </div>
+    <div class="nav">
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-history"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-search"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-home"/></svg></div>
+      <div class="nav-i"><svg class="ic" viewBox="0 0 100 100"><use href="#i-star"/></svg></div>
+      <div class="nav-i on"><svg class="ic" viewBox="0 0 100 100"><use href="#i-settings"/></svg></div>
+    </div>
+  </div></div>
+  <h2>⑪ 设置 · 第 2 页<em>主页挪过来的那些</em></h2>
+  <p>版本 · 设备 · 服务端脚本 · 拼音词条数 · 作者 · 开源地址。平时用不到，出问题时翻到这页就有。</p>
+</div>
+
+<!-- ==================== 12. 阅读器 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+    <div class="rfull">
+      （漫画图片铺满整屏）
+      <b>1236 × 1648　无边框　无状态条　无页码　无按钮</b>
+      <span>这里是占位说明，真机上是整张图</span>
+    </div>
+  </div></div>
+  <h2>⑫ 阅读器<em>真·全屏</em></h2>
+  <p>一个按钮都没有，全靠单击位置。分区见下一屏。</p>
+  <p class="warn">全屏后每翻一页整屏都在变，<b>闪躲不掉</b>，这是墨水屏物理限制。退路是把「全屏刷新」设成每 5 页一次。</p>
+</div>
+
+<!-- ==================== 13. 点击区域 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+    <div class="rfull">
+      <div class="zone" style="left:0;top:0;width:412px;height:1648px;">左 1/3<br>单击 → 上一页</div>
+      <div class="zone" style="left:412px;top:0;width:412px;height:1648px;">中 1/3<br>单击 → 打开菜单</div>
+      <div class="zone" style="left:824px;top:0;width:412px;height:1648px;">右 1/3<br>单击 → 下一页</div>
+      <b>（虚线框是热区，真机上完全看不见）</b>
+      <span>中 1/3 的<b>下半部分</b>就是你原来习惯按的位置，行为不变</span>
+    </div>
+  </div></div>
+  <h2>⑬ 单击区域图<em>热区怎么分</em></h2>
+  <p>竖着切三刀：<b>左 412px 上一页 · 中 412px 打开菜单 · 右 412px 下一页</b>。中条通全高，所以你原来按的中下方当然也算。</p>
+  <p class="warn"><b>还是要你拍板：</b>正中间现在也是打开菜单。要是你翻页时习惯戳中间，会频繁弹菜单。想避开就把中条缩成只在下 1/2，代价是上半中间点不动。你说哪种。</p>
+</div>
+
+<!-- ==================== 14. 首次提示 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+    <div class="rbase" style="flex:0 0 250px;justify-content:flex-end;padding-bottom:20px;">
+      （上方露出漫画顶部一条）
+    </div>
+    <div class="hintpanel">
+      <div class="hint-t">怎么翻页</div>
+      <div class="hint-s">屏幕上看不到按钮，用单击位置来操作。下面这张图就是全屏画面的分区。</div>
+      <div class="hint-main">
+        <div class="diag">
+          <div class="dg-c">上一页</div>
+          <div class="dg-c dg-c-mid"><div class="dg-free"></div><div class="dg-menu">菜单</div></div>
+          <div class="dg-c">下一页</div>
+        </div>
+        <div class="hint-list">
+          <div class="hint-li"><b>点画面左边</b><span>翻到上一页</span></div>
+          <div class="hint-li"><b>点画面右边</b><span>翻到下一页</span></div>
+          <div class="hint-li"><b>点画面中下方</b><span>打开菜单：跳页 · 章节 · 收藏 · 退出</span></div>
+        </div>
+      </div>
+      <div class="hint-btn">知道了</div>
+    </div>
+  </div></div>
+  <h2>⑭ 首次打开的一次性说明<em>只出现一次</em></h2>
+  <p>点「知道了」之后再也不出现。左边小图就是 ⑫ 的分区缩小版。</p>
+</div>
+
+<!-- ==================== 15. 菜单 · 未收藏 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+    <div class="rwrap">
+      <div class="rbase">
+        （漫画仍然是整屏，<b style="color:#555">没有被压缩</b>）
+        <span>菜单是<b>盖</b>在上面的，底下这张图一个像素都没动</span>
+      </div>
+      <div class="mpanel">
+        <div class="mp-h"><span>阅读菜单</span><span class="mp-h-r">第 12 话 · 8 / 24</span></div>
+        <div class="mp-row two">
+          <div class="mp-half">上一页</div>
+          <div class="mp-half">下一页</div>
+        </div>
+        <div class="mp-row"><span>跳转到页</span><span class="mp-v">输入页码</span></div>
+        <div class="mp-row"><span>章节列表</span><span class="mp-v">共 24 话</span></div>
+        <div class="mp-row"><span>全屏刷新</span><span class="mp-v">每 5 页</span></div>
+        <div class="mp-row">
+          <span>收藏本话</span>
+          <span class="mp-v">未收藏　<svg class="ic-m" viewBox="0 0 100 100"><use href="#i-star"/></svg></span>
+        </div>
+        <div class="mp-row"><span>退出阅读</span><span class="mp-v">返回书架</span></div>
+        <div class="mp-row close">关闭菜单</div>
+      </div>
+    </div>
+  </div></div>
+  <h2>⑮ 二级菜单 · 未收藏<em>覆盖式</em></h2>
+  <p>图片保持 1236 × 1648 原样不动，菜单是画在上面的一层。<b>开菜单只重画下半屏那块，图片本身从不重算。</b><br>
+     「未收藏」旁边是<b>空心星</b>（只有描边、里面白）。</p>
+</div>
+
+<!-- ==================== 16. 菜单 · 已收藏 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+    <div class="rwrap">
+      <div class="rbase">
+        （漫画仍然是整屏，<b style="color:#555">没有被压缩</b>）
+        <span>点过收藏之后：星标变实心，文字变「已收藏」</span>
+      </div>
+      <div class="mpanel">
+        <div class="mp-h"><span>阅读菜单</span><span class="mp-h-r">第 12 话 · 8 / 24</span></div>
+        <div class="mp-row two">
+          <div class="mp-half">上一页</div>
+          <div class="mp-half">下一页</div>
+        </div>
+        <div class="mp-row"><span>跳转到页</span><span class="mp-v">输入页码</span></div>
+        <div class="mp-row"><span>章节列表</span><span class="mp-v">共 24 话</span></div>
+        <div class="mp-row"><span>全屏刷新</span><span class="mp-v">每 5 页</span></div>
+        <div class="mp-row">
+          <span>收藏本话</span>
+          <span class="mp-v"><b>已收藏</b>　<svg class="ic-m solid" viewBox="0 0 100 100"><use href="#i-star"/></svg></span>
+        </div>
+        <div class="mp-row"><span>退出阅读</span><span class="mp-v">返回书架</span></div>
+        <div class="mp-row close">关闭菜单</div>
+      </div>
+    </div>
+  </div></div>
+  <h2>⑯ 二级菜单 · 已收藏<em>星标两态对照</em></h2>
+  <p><b>未收藏 ＝ 空心星</b>＋灰字；<b>已收藏 ＝ 实心黑星</b>＋黑字。</p>
+  <p>文字也要跟着变，是因为小星星的黑白差别隔着距离看不太清，<b>文字从灰变黑是一大块面积的变化，扫一眼就确认了</b>。</p>
+</div>
+
+<!-- ==================== 17. 状态页 ==================== -->
+<div class="item">
+  <div class="slot"><div class="screen">
+    <div class="bar">
+      <span>服务器　未连接</span>
+      <span class="bar-btn">重新连接</span>
+    </div>
+    <div class="st-body">
+      <div class="st-t">无法连接服务器</div>
+      <div class="st-p">请确认电脑上的 <b>jm_kindle_raw.py</b> 正在运行，<br>并且 Kindle 和电脑连在同一个 Wi-Fi 下。</div>
+      <div class="st-box">
+        <div><span>地址</span><span>192.168.1.7:8001</span></div>
+        <div><span>状态</span><span>连接超时（3 秒）</span></div>
+        <div><span>上次成功</span><span>今天 14:32</span></div>
+      </div>
+      <div class="st-btn">重试</div>
+    </div>
+    <div class="st-note">
+      <div class="st-note-h">加载中一律用「文字 + 方块」，没有转圈动画：</div>
+      <div class="ld">
+        <span class="ld-t">正在获取第 3 页…</span>
+        <span class="ld-q"><i class="f"></i><i class="f"></i><i></i><i></i><i></i><i></i></span>
+      </div>
+    </div>
+  </div></div>
+  <h2>⑰ 连接失败 / 加载中<em>3 秒刷新的心理预期</em></h2>
+  <p>出错页把<b>地址、原因、上次成功时间</b>全摊开，不用翻日志。「重试」是整屏最大的一块黑，位置固定。<br>
+     加载进度用<b>六个方块</b>代替转圈：循环动画在这儿只会留一串残影。</p>
+</div>
+
+</div>
+</body>
+</html>

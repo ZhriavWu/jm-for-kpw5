@@ -1,0 +1,3037 @@
+// JMcomic for kindle —— 界面
+//
+// 规格书：design/UI-SPEC.md（v5，已冻结）。**所有数值以那份为准**，
+// 1:1 真机像素（1236 × 1648），可以直接量。
+//
+// # 屏幕编号（和 src/main.rs 的 Screen 枚举一一对应）
+//
+//   0 历史记录（首屏）   1 搜索（含键盘）   2 主页        3 收藏
+//   4 设置·第1页         5 设置·关于       6 快速入门     7 本子详情
+//   8 阅读器（全屏）     9 出错页
+//
+// # 骨架（规格 3.5）
+//
+//     [ 状态条 88  or  内页顶栏 128 ]
+//     [ 内容区 flex:1               ]
+//     [ 翻页条 140 ]   ← 管「这一屏的内容」
+//     [ 底栏   108 ]   ← 管「整个 App」，位置永不改变
+//
+// 阅读器**没有底栏**，全屏到底。
+//
+// # 这版和上一版的根本区别
+//
+// 上一版是「顶栏 + 内容 + 底栏（状态文字）」的三段式，靠顶栏的返回键和首页
+// 的按钮导航。这一版改成**底栏五项常驻导航**（历史/搜索/主页/收藏/设置），
+// 阅读器之外每屏都有 —— 位置永不改变，所以用户永远知道自己在哪、能去哪。
+//
+// # 设计约束（违反即返工，规格第 1 节）
+//
+//   1  只有 16 级灰，且 238–255 之间是空的 → 浅灰做不出来，只用六档灰
+//   2  没有颜色 → 分层只靠反白 / 边框粗细 / 留白
+//   3  没有动效、没有 hover → 任何动画都会留一串残影
+//   4  边框最细 2px，主线 3px → 1px 会被采样吃成断线
+//   5  没有滚动，全部翻页
+//   6  触摸只有单击，可点区域 ≥ 100px
+//   7  不用符号字形（✕ ▶ ⌫ ★）→ 文泉驿里没有，会掉成空白。图标一律 Path 画
+//   8  不用浅灰底（#F5F5F5 之类）→ 和背景糊住，分层改「黑框 + 纯白」
+//   9  覆盖优于重排 → 弹层盖在内容上，底下内容一个像素都不动
+//   10 高度恒定 → 候选词栏永远 142px（v6），状态切换时不重排
+
+import { Tok } from "tokens.slint";
+import {
+    NavBar, StatusBar, AppBar, PagerBar, BtnBox, BtnOutline, ListLine, CoverCell,
+} from "chrome.slint";
+import { IcoStar, IcoBook, IcoChevLeft, IcoChevRight, IcoPower } from "icons.slint";
+
+// ---------------------------------------------------------------- 数据结构
+
+export struct ListRow {
+    label: string,
+    sub: string,
+    // 标题**下面**那行小字，空串 = 不画（标题照旧单行垂直居中）。
+    // 只有收藏页的单话用得上：上面本子标题、下面「第 N 话」。
+    sub-label: string,
+    cover: image,
+    idx: int,
+    // 封面框尺寸由 Rust 按**图片的实际比例**算好（见 src/render.rs 的 fit_box）。
+    // jmcomic 的封面本身是正方形（量过 59 张全是 1.00 占宽），
+    // 写死成竖长方框的话方图上下会各空一截，看起来像「框是长的、图是方的」。
+    cover-w: int,
+    cover-h: int,
+    // 星标：0 = 不显示，1 = 空心，2 = 实心（收藏页用）
+    star: int,
+}
+
+/// 详情页的标签。位置由 Rust 算好传过来（流式排布），
+/// 因为 Slint 没有内置的换行流式布局，标签数量又是变的。
+export struct TagChip {
+    label: string,
+    x: int,
+    y: int,
+    w: int,
+    idx: int,
+}
+
+/// 一个键帽。规格 4.2：字母键 100×100 / 3px 边框 / 40px 字；
+/// 功能键字号 30px，宽度由调用方给（删除 168 / 空格 320 / 搜索 256 / 收起 168）。
+component Key inherits Rectangle {
+    in property <string> label: "";
+    in property <length> kw: 100px;
+    /// 功能键（字号小一号）
+    in property <bool> fn-key: false;
+    /// 反白（「搜索」那颗是整屏的主动作）
+    in property <bool> solid: false;
+    callback hit();
+
+    width: root.kw;
+    height: 100px;
+    background: root.solid ? Tok.ink : Tok.paper;
+    border-width: Tok.border;
+    border-color: Tok.ink;
+
+    Text {
+        text: root.label;
+        color: root.solid ? Tok.paper : Tok.ink;
+        font-size: root.fn-key ? 30px : Tok.fs-key;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: parent.width;
+        height: parent.height;
+        overflow: elide;
+    }
+
+    TouchArea {
+        clicked => { root.hit(); }
+    }
+}
+
+/// 候选格里的一格（v6：横排一行 5 个，每格 **204 × 136**）。
+///
+/// 选中态是**整格反白**（规格 5：
+/// 墨水屏没有颜色，选中必须靠一块看得见的实心黑）。
+component CandCell inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> on: false;
+    /// 字号。**长的候选要小一号**（设计稿 `.cand-i.sm`）：
+    /// 204px 的格子去掉内边距后放不下 5 个 44px 的字（5×44=220），所以要降档。
+    /// 由 Rust 按每页最长的那条算，整行统一 —— Slint 量不了文字宽度。
+    in property <length> fs: 44px;
+    callback hit();
+
+    width: 204px;
+    height: 136px;
+    background: root.on ? Tok.ink : Tok.paper;
+
+    Text {
+        text: root.label;
+        color: root.on ? Tok.paper : Tok.ink;
+        font-size: root.fs;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: parent.width;
+        height: parent.height;
+        overflow: elide;
+    }
+
+    TouchArea {
+        clicked => { root.hit(); }
+    }
+}
+
+/// 设置页的分组标题（规格 4.6：72px，32px/700）
+component SetGroup inherits Rectangle {
+    in property <string> title: "";
+    width: 1116px;
+    height: 72px;
+    background: transparent;
+
+    Text {
+        x: 0;
+        width: parent.width;
+        height: parent.height;
+        text: root.title;
+        color: Tok.ink;
+        font-size: 32px;
+        font-weight: 700;
+        vertical-alignment: center;
+    }
+}
+
+/// 设置页的一行：左标签 / 右当前值。
+///
+/// ⚠️ 规格 4.6 想要双色（说明 #555、当前值 #000），但 Slint 的一行 Text
+///    不能混色。折中成**右侧整体用 #000** —— 那一侧本来就是用户要的信息。
+component SetRow inherits Rectangle {
+    in property <string> label: "";
+    in property <string> value: "";
+    callback hit();
+
+    width: 1116px;
+    height: 149px;
+    background: Tok.paper;
+
+    Rectangle {
+        x: 0;
+        y: parent.height - Tok.hairline;
+        width: parent.width;
+        height: Tok.hairline;
+        background: Tok.g8;
+    }
+
+    Text {
+        x: 0;
+        width: 380px;
+        height: parent.height;
+        text: root.label;
+        color: Tok.ink;
+        font-size: 38px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Text {
+        width: parent.width - 380px;
+        height: parent.height;
+        x: 380px;
+        text: root.value;
+        color: Tok.ink;
+        font-size: 31px;
+        horizontal-alignment: TextHorizontalAlignment.right;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    TouchArea {
+        clicked => { root.hit(); }
+    }
+}
+
+/// 数字小键盘的一颗键。比字母键大（规格 6：可点区域 ≥ 100px，
+/// 数字键只有 12 颗，排得开就排大点）。
+component NumKey inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> fn-key: false;
+    in property <bool> solid: false;
+    callback hit();
+
+    background: root.solid ? Tok.ink : Tok.paper;
+    border-width: Tok.border;
+    border-color: Tok.ink;
+
+    Text {
+        text: root.label;
+        color: root.solid ? Tok.paper : Tok.ink;
+        font-size: root.fn-key ? 34px : 48px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: parent.width;
+        height: parent.height;
+        overflow: elide;
+    }
+
+    TouchArea {
+        clicked => { root.hit(); }
+    }
+}
+
+/// 阅读菜单里的一行：左标签 / 右当前值。
+component MenuRow inherits Rectangle {
+    in property <string> label: "";
+    in property <string> value: "";
+    callback hit();
+
+    width: Tok.screen-w;
+    height: 122px;
+    background: Tok.paper;
+
+    Text {
+        x: 50px;
+        width: 460px;
+        height: parent.height;
+        text: root.label;
+        color: Tok.ink;
+        font-size: 40px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Text {
+        width: 640px;
+        height: parent.height;
+        x: parent.width - 50px - self.width;
+        text: root.value;
+        color: Tok.g5;
+        font-size: 30px;
+        horizontal-alignment: TextHorizontalAlignment.right;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Rectangle {
+        x: 0;
+        y: parent.height - Tok.hairline;
+        width: parent.width;
+        height: Tok.hairline;
+        background: Tok.g8;
+    }
+
+    TouchArea {
+        clicked => { root.hit(); }
+    }
+}
+
+/// 阅读菜单里的对半两格（上一页 / 下一页），中间 2px 竖线。
+component MenuRow2 inherits Rectangle {
+    in property <string> left-label: "";
+    in property <string> right-label: "";
+    callback left-hit();
+    callback right-hit();
+
+    width: Tok.screen-w;
+    height: 122px;
+    background: Tok.paper;
+
+    Text {
+        x: 0;
+        y: 0;
+        width: parent.width / 2;
+        height: parent.height;
+        text: root.left-label;
+        color: Tok.ink;
+        font-size: 40px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    Text {
+        x: parent.width / 2;
+        y: 0;
+        width: parent.width / 2;
+        height: parent.height;
+        text: root.right-label;
+        color: Tok.ink;
+        font-size: 40px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    Rectangle {
+        x: parent.width / 2 - 1px;
+        y: 0;
+        width: Tok.hairline;
+        height: parent.height;
+        background: Tok.g8;
+    }
+    Rectangle {
+        x: 0;
+        y: parent.height - Tok.hairline;
+        width: parent.width;
+        height: Tok.hairline;
+        background: Tok.g8;
+    }
+
+    TouchArea {
+        x: 0;
+        width: parent.width / 2;
+        height: parent.height;
+        clicked => { root.left-hit(); }
+    }
+    TouchArea {
+        x: parent.width / 2;
+        width: parent.width / 2;
+        height: parent.height;
+        clicked => { root.right-hit(); }
+    }
+}
+
+/// 快速入门里的一步：序号方块 + 标题（可挂标签）+ 说明 + 可选命令框。
+component GuideStep inherits Rectangle {
+    in property <int> num: 1;
+    in property <string> title: "";
+    /// 标签文字，空串表示不挂
+    in property <string> tag: "";
+    in property <string> desc: "";
+    /// 命令框内容，空串表示不画
+    in property <string> code: "";
+    /// 标题/标签的**估算像素宽** —— Slint 量不了文字宽度，
+    /// 标签要贴在标题后面就得知道它多宽。由 Rust 按字符估（见 src/main.rs 的 text_w）。
+    in property <length> title-len: 0px;
+    in property <length> tag-len: 0px;
+
+    width: 1116px;
+    background: transparent;
+
+    // 序号方块：76×76 反白，40px 白字
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: 76px;
+        height: 76px;
+        background: Tok.ink;
+
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: root.num;
+            color: Tok.paper;
+            font-size: 40px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    Text {
+        x: 76px + 30px;
+        y: 0;
+        width: parent.width - 106px;
+        height: 56px;
+        text: root.title;
+        color: Tok.ink;
+        font-size: 38px;
+        font-weight: 700;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    // 「必须先做」标签
+    if root.tag != "" : Rectangle {
+        x: 76px + 30px + root.title-len;
+        y: 6px;
+        width: root.tag-len + 24px;
+        height: 40px;
+        border-width: Tok.hairline;
+        border-color: Tok.ink;
+        background: Tok.paper;
+
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: root.tag;
+            color: Tok.ink;
+            font-size: 24px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    Text {
+        x: 76px + 30px;
+        y: 62px;
+        width: parent.width - 106px;
+        height: root.code == "" ? parent.height - 62px : 150px;
+        text: root.desc;
+        color: Tok.g5;
+        font-size: 29px;
+        wrap: TextWrap.word-wrap;
+    }
+
+    if root.code != "" : Rectangle {
+        x: 76px + 30px;
+        y: parent.height - 70px;
+        width: parent.width - 106px;
+        height: 70px;
+        border-width: Tok.hairline;
+        border-color: Tok.g8;
+        background: Tok.paper;
+
+        Text {
+            x: 22px;
+            width: parent.width - 44px;
+            height: parent.height;
+            text: root.code;
+            color: Tok.ink;
+            font-size: 29px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+/// 出错页信息框里的一行（地址 / 状态 / 上次成功）。
+component InfoLine inherits Rectangle {
+    in property <string> label: "";
+    in property <string> value: "";
+
+    x: 0;
+    width: Tok.screen-w - 120px;
+    height: 96px;
+    background: Tok.paper;
+
+    Text {
+        x: 34px;
+        width: 200px;
+        height: parent.height;
+        text: root.label;
+        color: Tok.ink;
+        font-size: 32px;
+        vertical-alignment: center;
+    }
+    Text {
+        width: parent.width - 268px;
+        height: parent.height;
+        x: parent.width - 34px - self.width;
+        text: root.value;
+        color: Tok.g5;
+        font-size: 32px;
+        horizontal-alignment: TextHorizontalAlignment.right;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Rectangle {
+        x: 0;
+        y: parent.height - Tok.hairline;
+        width: parent.width;
+        height: Tok.hairline;
+        background: Tok.g8;
+    }
+}
+
+export component AppWindow inherits Window {
+    // 屏幕编号，见文件头
+    in property <int> screen: 0;
+
+    // ---- 服务器状态条 ----
+    in property <string> conn-text: "服务器　未连接";
+    /// 底栏高亮第几项，−1 = 都不亮。由 Rust 按 screen 算好
+    in property <int> nav-active: -1;
+
+    // ---- 列表通用 ----
+    in property <[ListRow]> rows: [];
+    in property <[ListRow]> col-left: [];
+    in property <[ListRow]> col-right: [];
+    in property <string> list-info: "";
+    in property <bool> has-prev: false;
+    in property <bool> has-next: false;
+    in property <string> list-title: "";
+    in property <string> list-right: "";
+    in property <string> list-sub: "";
+
+    // ---- 搜索页（v5：输入框内容 = 最终搜索词）----
+    /// 输入框里的内容。**未选候选时就是拼音原文**，所以打英文时它显示英文
+    in property <string> input-text: "";
+    /// 最近搜索的关键词（最新在前）。
+    in property <[string]> recent-searches: [];
+    /// 现在该不该把最近搜索铺在结果区上。条件由 Rust 算好（见 View::show_recent）。
+    in property <bool> show-recent: false;
+    /// 键盘是否竖起。键盘是**覆盖**在结果区上的，不挤压它。
+    in property <bool> kb-shown: true;
+    /// 搜索结果的**行高**，由 Rust 按结果条数算：把 1128px 均分给 N 条，
+    /// 这样有多少条就铺满多少，底下不留空白（和历史页 8 行均分同一个做法）。
+    /// 夹在 104..240 之间 —— 太少时行别撑得离谱，太多时别挤成一条线。
+    in property <length> row-h: 141px;
+
+    // 键盘三行的字母。**只在这里定义一份**，字母键按它渲染、
+    // 按下的字符也直接从它取 —— 不存在「两边表不同步」那个隐患。
+    in property <[string]> kb-row-1: ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"];
+    in property <[string]> kb-row-2: ["a", "s", "d", "f", "g", "h", "j", "k", "l"];
+    in property <[string]> kb-row-3: ["z", "x", "c", "v", "b", "n", "m"];
+    /// 候选词，**横排一行 5 个**（v6，`ime::PAGE`）。
+    in property <[string]> cand-row-a: [];
+    in property <int> cand-sel: -1;
+    /// 候选区状态。空候选时这里放说明文字（**区域高度不变**）
+    in property <string> cand-note: "";
+    in property <bool> cand-empty: false;
+    /// 候选格字号。有长候选（≥4 字）时整行降到 36，否则 44 ——
+    /// 170px 的格子放不下 4 个 44px 的字。由 Rust 算。
+    in property <int> cand-fs: 44;
+    /// 候选还能不能往前/往后翻。到头的那一侧按钮显示成 #999（禁用态）。
+    in property <bool> cand-has-prev: false;
+    in property <bool> cand-has-next: false;
+    in property <[string]> sort-labels: [];
+    in property <int> sort-active: -1;
+
+    // ---- 设置 ----
+    in property <string> set-addr: "";
+    in property <string> set-conn: "";
+    in property <string> refresh-label: "";
+    in property <bool> refresh-available: false;
+    in property <string> cache-label: "";
+    in property <string> version-label: "";
+    in property <string> device-label: "";
+    in property <string> server-label: "";
+    in property <string> pinyin-label: "";
+    in property <string> author-label: "";
+
+    // ---- 收藏 ----
+    in property <int> fav-tab: 0;
+    in property <string> fav-right: "";
+
+    // ---- 快速入门 ----
+    in property <int> guide-page: 0;
+
+    // ---- 数字小键盘覆盖层 ----
+    //
+    // 规格 4.6：「需要输数字的（如全屏刷新）**在原行上弹小键盘，不做二级页面**
+    // —— 墨水屏每多一跳都要等 1–3 秒。」
+    //
+    // 所以这一层是**盖在当前屏上**的（规则 ⑨「覆盖优于重排」），
+    // 底下的界面一个像素都不动，关掉就回到原样，不产生任何跳屏。
+    //
+    // 一处实现伺候三个用途：全屏刷新间隔 / 跳转到页 / 按本子 ID 打开。
+    // 三个都是纯数字输入，键盘布局完全一样 —— 没必要做三份。
+    in property <bool> keypad-shown: false;
+    /// 标题，说明这一下在输什么（如「全屏刷新：每几次全刷一次」）
+    in property <string> keypad-title: "";
+    /// 已经输进去的数字
+    in property <string> keypad-value: "";
+    /// 上面那串数字的**字符个数**，由 Rust 给 ——
+    /// Slint 的字符串没有 `.length`，光标位置只能这么算。
+    /// 数字是等宽的，所以能用「个数 × 每字宽」直接定
+    in property <int> keypad-len: 0;
+    /// 输入框右边那行说明（如「0 = 关闭」）
+    in property <string> keypad-note: "";
+
+    // ---- 出错页 / 加载 ----
+    in property <string> err-title: "";
+    in property <string> err-desc: "";
+    in property <string> err-addr: "";
+    in property <string> err-state: "";
+    in property <string> err-last: "";
+    in property <bool> loading: false;
+    in property <string> loading-text: "载入中…";
+    /// 已加载页数 / 总页数，画加载方块用
+    in property <int> loaded-count: 0;
+    in property <int> total-count: 0;
+
+    // ---- 本子详情 ----
+    in property <image> album-cover;
+    in property <int> album-cover-w: 240;
+    in property <int> album-cover-h: 332;
+    in property <string> album-title: "";
+    /// 作者 + 车牌号（本子 ID）合成的一行，如「真田一辉　·　ID 65539」。
+    /// **由 Rust 拼好**：Slint 量不了文字宽度，两个 Text 想挨着排就得知道前一个多宽。
+    in property <string> album-byline: "";
+    in property <[TagChip]> album-tags: [];
+
+    // ---- 阅读器 ----
+    in property <image> page-image;
+    in property <string> reader-title: "";
+    in property <bool> scroll-mode: false;
+    in property <string> fit-label: "竖边适应";
+    in property <bool> reader-menu: false;
+    in property <bool> reader-can-fit: true;
+    /// 菜单标题栏右边「第 12 话 · 8 / 24」
+    in property <string> reader-pos: "";
+    /// 「章节列表」行右边「共 24 话」
+    in property <string> reader-chapters: "";
+    in property <bool> reader-starred: false;
+    /// 首次进阅读器的一次性说明（点过「知道了」就不再出现）
+    in property <bool> reader-hint: false;
+
+    // ---- 屏保 ----
+    in property <bool> screensaver-shown: false;
+    in property <image> screensaver-image;
+
+    // ---------------------------------------------------------------- 回调
+
+    callback quit-requested();
+    /// 底栏五项：0 历史 1 搜索 2 主页 3 收藏 4 设置
+    callback nav-picked(int);
+    callback back();
+    callback retry();
+
+    callback list-prev();
+    callback list-next();
+    callback row-activated(int);
+    /// 列表行右侧星标被点（收藏/取消收藏）
+    callback star-hit(int);
+
+    // 搜索
+    /// 字母键。**传字符本身而不是下标** —— 上一版用下标（KeyChar(i) + 两边各一份
+    /// KEYS 表），表一旦不同步就是「按 A 出 B」，而且不报错。传字符没这个隐患。
+    callback key-char(string);
+    callback key-space();
+    callback key-backspace();
+    callback key-symbols();
+    callback key-confirm();
+    callback ime-cand-hit(int);
+    callback ime-page(int);
+    callback sort-picked(int);
+    /// 点最近搜索里的第 i 条
+    callback recent-picked(int);
+    /// 清空最近搜索
+    callback recent-clear();
+    /// 点输入框：把键盘叫回来改词
+    callback kb-wanted();
+    /// 点「收起」：放下键盘，结果区从 490px 变成 1128px
+    callback kb-hide();
+
+    // 设置
+    callback set-edit-refresh();
+    callback set-edit-server();
+    callback set-recheck();
+    callback set-clear-cache();
+    /// 设置两页之间翻页
+    callback page-left();
+    callback page-right();
+
+    // 收藏
+    callback fav-tab-picked(int);
+
+    // 快速入门
+    callback guide-prev();
+    callback guide-next();
+
+    // 数字小键盘覆盖层
+    callback keypad-digit(string);
+    callback keypad-backspace();
+    callback keypad-clear();
+    callback keypad-cancel();
+    callback keypad-ok();
+
+    /// 主页的「按本子 ID 打开」——留着这个入口是为了「另加不删减」，
+    /// 底栏五项里没有它的位置，主页放一个次级按钮最省事。
+    callback open-by-id();
+
+    // 阅读器
+    callback reader-menu-toggle();
+    callback reader-fit-toggle();
+    callback reader-refresh();
+    callback reader-prev();
+    callback reader-next();
+    callback reader-goto-page();
+    callback reader-open-chapters();
+    callback reader-star-toggle();
+    callback reader-exit();
+    callback reader-hint-dismiss();
+
+    callback tag-activated(int);
+
+    // ================================================================
+    // 0 历史记录（首屏）
+    //
+    // 规格 4.1：
+    //   [状态条]   88
+    //   [标题区]   150   标题「历史记录」56px/700，padding-top 30
+    //   [副标题]   76    28px #555，padding-top 14，左右 60
+    //   [列表]     flex  上边距 20，8 行均分
+    //   [翻页条]   140
+    //   [底栏]     108
+    //
+    // ⚠️ **一屏正好 8 行，不留半行** —— 留半行会让人误以为还能往下滑，
+    //    而这块屏根本没有滚动。
+    // ================================================================
+    if root.screen == 0 : Rectangle {
+        x: 0;
+        y: 0;
+        width: Tok.screen-w;
+        height: Tok.screen-h;
+        background: Tok.paper;
+
+        StatusBar {
+            y: 0;
+            text: root.conn-text;
+            retry => { root.retry(); }
+        }
+
+        Text {
+            x: 60px;
+            y: 88px + 30px;
+            width: Tok.screen-w - 120px;
+            height: 80px;
+            text: "历史记录";
+            color: Tok.ink;
+            font-size: Tok.fs-page-title;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+
+        Text {
+            x: 60px;
+            y: 88px + 150px;
+            width: Tok.screen-w - 120px;
+            height: 76px;
+            text: root.list-sub;
+            color: Tok.g5;
+            font-size: Tok.fs-meta;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        // 列表：8 行均分（(1648−88−150−76−140−108−20) / 8 = 133.25）
+        for r[i] in root.rows : ListLine {
+            y: 314px + 20px + i * (1066px / 8);
+            width: Tok.screen-w;
+            height: 1066px / 8;
+            label: r.label;
+            meta: r.sub;
+            thumb: r.cover;
+            star: r.star;
+            activated => { root.row-activated(r.idx); }
+            star-hit => { root.star-hit(r.idx); }
+        }
+
+        PagerBar {
+            y: 1648px - 108px - 140px;
+            info: root.list-info;
+            has-prev: root.has-prev;
+            has-next: root.has-next;
+            prev => { root.list-prev(); }
+            next => { root.list-next(); }
+        }
+
+        NavBar {
+            y: 1648px - 108px;
+            active: root.nav-active;
+            picked(i) => { root.nav-picked(i); }
+        }
+    }
+
+    // ================================================================
+    // 1 搜索（v6 输入法）
+    //
+    // 规格 4.2 + v6 尺寸图：
+    //   [搜索栏]   176   ← 返回键与输入框同行，省掉独立顶栏
+    //   [排序栏]    96   ← 规格没画，保留的旧功能（服务端没给就整行不显示）
+    //   [结果区]  1128   ← **永远这么高**，键盘盖在上面而不是挤压它
+    //   [候选词栏] 142   ← **高度恒定**，横排一行 5 个 + 两端尖角
+    //   [键盘]     463   ← 无上边框（由候选栏的下边框兼任）
+    //   [底栏]     108
+    //
+    // 从下往上算：108 + 463 + 142 = 713 → 候选栏顶在 y=935；
+    // 结果区 272..1400（1128px），键盘竖起时下面那截被盖住。
+    //
+    // # v5/v6 最核心的一条：**输入框里的内容就是最终要搜的东西**
+    //
+    // 没有中/英模式键。打字母 = 英文，点了候选才变汉字。
+    // 所以**输入框本身就是那个「防误操作」的反馈**：按搜索前看着它就是。
+    //
+    // （原来右边还有一行常驻的「将搜索：xxx」把同一件事再说一遍。
+    //   用户要求去掉 —— 它没有新信息，却白占 340px 宽度，
+    //   而那条宽度正是光标被挤出去的原因。现在整条框都归文字。）
+    //
+    // # 两个子状态（kb-shown）
+    //
+    // ⚠️ **键盘是「盖」上去的，不是「挤」上去的**（规格第 9 条：覆盖优于重排）。
+    //    结果区的高度和每一行的位置**永远按键盘收起算** ——
+    //    打字时列表一个像素都不动，只重画被盖住的那块。
+    //    挤压的话每弹一次键盘都要整块重排 → 整屏闪。
+    //
+    //    按「搜索」或「收起」→ 键盘放下，6 行结果全露出来；
+    //    点输入框把键盘叫回来改词。
+    // ================================================================
+    if root.screen == 1 : Rectangle {
+        x: 0;
+        y: 0;
+        width: Tok.screen-w;
+        height: Tok.screen-h;
+        background: Tok.paper;
+
+        // ---- 搜索栏 ----
+        BtnBox {
+            x: 40px;
+            y: (176px - self.height) / 2;
+            width: 132px;
+            height: 112px;
+            label: "返回";
+            clicked => { root.back(); }
+        }
+
+        Rectangle {
+            x: 40px + 132px + 24px;
+            y: (176px - self.height) / 2;
+            width: Tok.screen-w - 40px - 196px - 40px;
+            height: 112px;
+            background: Tok.paper;
+            border-width: Tok.border;
+            border-color: Tok.ink;
+
+            // 文字 + 光标**排在同一行里**，光标紧贴在最后一个字后面。
+            //
+            // ⚠️ 光标**不能自己算 x**（原来就是那么干的，`x: 28px + caret-x`）。
+            //
+            //    `caret_x()` 按「中日文 44 / ASCII 28 + 字距 3」估宽度，而实际
+            //    渲染出来的步进和这个估法对不上：算出来 31、实际约 26，
+            //    每多打一个字就多偏 5px —— **误差随字数累积**，
+            //    表现就是用户说的「每打一次，离最右边那个字的距离就远一些」。
+            //    先试着补字距（+3），漂移只是变小、没有消失，说明估宽这条路
+            //    本身就不可靠（字体度量只有渲染器知道）。
+            //
+            //    现在改成**让 Slint 自己排**：光标是 HorizontalLayout 里
+            //    紧跟文字的那一格，字号一致，后面的间距就由它算 ——
+            //    结构上不可能再漂。`caret-x` 这个属性因此**不再需要**。
+            //
+            // ⚠️ 样式：**字号 + 字距必须和正文一模一样**（44 / 3px）。
+            //    否则末尾那个空格的 advance 会不同，光标又会偏一点。
+            //    `overflow: elide` 也是必需的 —— 超长时让文字自己截断并显示省略号，
+            //    光标被顶到右边缘为止，不会跑到框外。
+            HorizontalLayout {
+                x: 28px;
+                y: 0;
+                width: parent.width - 56px;
+                height: parent.height;
+                spacing: 0;
+                // 水平：从左开始排
+                alignment: start;
+                // ⚠️ 垂直居中**必须用 `cross-axis-alignment`**，不能用 `alignment`。
+                //    Slint 这两个属性是**不同**的轴（见 builtin_elements.rs）：
+                //      * `alignment`             → **水平**（main）轴
+                //      * `cross-axis-alignment`  → **垂直**（cross）轴，默认 `stretch`
+                //    只写 `alignment: start` 的话垂直方向没人管，光标会被顶到框顶 ——
+                //    实测光标 y 15..42 而文字 35..56，正好高 17 物理px，
+                //    就是用户报的「光标跑到字的右上方」。
+                cross-axis-alignment: center;
+
+                Text {
+                    text: root.input-text;
+                    color: Tok.ink;
+                    font-size: Tok.fs-input;
+                    letter-spacing: 3px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    // ⚠️ **只能用自然宽度（stretch 0）。**
+                    //    写 1 的话文字会撑满整行，反而把光标顶到最右边 ——
+                    //    那就成了「光标永远在最右」，等于没修。
+                    //    stretch 0 + elide：正常长度用自然宽度、光标紧跟其后；
+                    //    超长时文字自己截断显示省略号，光标停在右边缘。
+                    horizontal-stretch: 0;
+                }
+
+                // 静态光标：墨水屏闪不了，所以常亮。
+                // 高 54 是写死的，靠上面 `cross-axis-alignment: center` 垂直居中 ——
+                // 不需要 `vertical-stretch`（它会和 center 的语义打架，看着像配置了却没用）。
+                //
+                // ⚠️ **宽度必须是偶数**，别改回 3px（和 README 第 7 条「边框不能是 1px」
+                //    是同一类坑：桌面预览缩放 0.5，奇数宽会落到半像素上）。
+                //
+                //    渲染器对矩形边做 `round()` 取整，物理宽 = round(x+W) − round(x)。
+                //    W 是整数时这个差**恒等于 W**；W 是小数时就会随位置摇摆：
+                //
+                //      | 逻辑宽 | 缩放 | 物理宽 | 结果 |
+                //      |--------|------|--------|------|
+                //      | 3px    | 0.5  | 1.5    | **在 1 和 2 之间交替** |
+                //      | 4px    | 0.5  | 2      | 恒定 2 |
+                //      | 4px    | 1.0  | 4      | 恒定 4 |
+                //
+                //    实测（逐字符截图量光标物理宽）：3px 时是
+                //    `1 1 2 2 2 2 1 2 1 1 2 2 2 1 1` —— 每打几个字就「细一下」，
+                //    正是用户报的「输几次变细，再输几次又变粗」。
+                //    总墨量只有 27 / 54 两种值、没有过渡灰，证明是**取整**而非抗锯齿。
+                //
+                //    真机缩放是 1.0（后端没设 scale_factor），3px 本来就不会抖，
+                //    但预览会抖 —— 而预览的意义就是「看到的就是真机的样子」。
+                //    取偶数两边都稳，代价是真机上从 3px 变 4px（略粗一点点）。
+                Rectangle {
+                    width: 4px;
+                    height: 54px;
+                    background: Tok.ink;
+                }
+            }
+
+            TouchArea {
+                clicked => { root.kb-wanted(); }
+            }
+        }
+
+        // ---- 排序 + 页信息（一行，96px）----
+        // ⚠️ 规格 4.2 没画排序栏，这一条是**保留的旧功能**（用户要求「另加不删减」）。
+        // 选项由服务端 /api/info 的 sort_options 给，客户端不写死 ——
+        // 旧服务端没这个字段时整行不显示。
+        Rectangle {
+            y: 176px;
+            width: Tok.screen-w;
+            height: 96px;
+            background: Tok.paper;
+
+            if root.sort-labels.length > 0 : Rectangle {
+                x: 40px;
+                y: 0;
+                width: parent.width - 80px;
+                height: parent.height;
+                background: transparent;
+
+                for s[i] in root.sort-labels : Rectangle {
+                    width: (parent.width - 260px) / root.sort-labels.length - 20px;
+                    height: 76px;
+                    x: i * ((parent.width - 260px) / root.sort-labels.length);
+                    y: 10px;
+                    background: i == root.sort-active ? Tok.ink : Tok.paper;
+                    border-width: Tok.border;
+                    border-color: Tok.ink;
+
+                    Text {
+                        text: s;
+                        color: i == root.sort-active ? Tok.paper : Tok.ink;
+                        font-size: 30px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: parent.width;
+                        height: parent.height;
+                        overflow: elide;
+                    }
+
+                    TouchArea {
+                        clicked => { root.sort-picked(i); }
+                    }
+                }
+
+                Text {
+                    width: 240px;
+                    height: parent.height;
+                    x: parent.width - self.width;
+                    text: root.list-info;
+                    color: Tok.g5;
+                    font-size: Tok.fs-meta;
+                    horizontal-alignment: TextHorizontalAlignment.right;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+
+        // ---- 中间区：结果列表 / 引导文字 ----
+        //
+        // ⚠️ **高度和行位置永远不变**（规格第 9 条：覆盖优于重排）。
+        //
+        // 键盘弹出时，结果是**被盖住**而不是被挤上去的。理由：
+        // 挤压会让所有行重新排版 → 整块重画 → 墨水屏闪一下；
+        // 覆盖只重画被盖住的那块，列表本身一个像素都不动。
+        Rectangle {
+            y: 272px;
+            width: Tok.screen-w;
+            height: 1128px;
+            background: Tok.paper;
+            clip: true;
+
+            // ---- 空态 ①：最近搜索 ----
+            //
+            // 只在「列表空 + 没在加载 + 有历史词」时出现（条件由 Rust 算好）。
+            // 这一块是**图片优先改版后加回来的文字入口**：搜索页平时满屏封面，
+            // 想不起上次搜了什么时，这里能一键回填。
+            if root.show-recent : Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                background: Tok.paper;
+
+                Text {
+                    x: 60px;
+                    y: 20px;
+                    width: parent.width - 260px;
+                    height: 70px;
+                    text: "最近搜索";
+                    color: Tok.ink;
+                    font-size: 38px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                Text {
+                    width: 120px;
+                    height: 70px;
+                    x: parent.width - 60px - self.width;
+                    y: 20px;
+                    text: "清空";
+                    color: Tok.g5;
+                    font-size: 28px;
+                    horizontal-alignment: TextHorizontalAlignment.right;
+                    vertical-alignment: center;
+                    TouchArea {
+                        clicked => { root.recent-clear(); }
+                    }
+                }
+
+                // 10 条 × 96px = 960，加上标题 110 正好 1070 ≤ 1128。
+                // ⚠️ 键盘竖起时只露出上面约 660px（到 y=935），
+                //    能点到的前 5 条足够用；再多也只是被键盘盖住。
+                for k[i] in root.recent-searches : Rectangle {
+                    x: 60px;
+                    y: 110px + i * 96px;
+                    width: parent.width - 120px;
+                    height: 84px;
+                    background: Tok.paper;
+                    border-width: 2px;
+                    border-color: Tok.g8;
+
+                    Text {
+                        x: 24px;
+                        width: parent.width - 48px;
+                        height: parent.height;
+                        text: k;
+                        color: Tok.ink;
+                        font-size: 34px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    TouchArea {
+                        clicked => { root.recent-picked(i); }
+                    }
+                }
+            }
+
+            // ---- 空态 ②：什么都没有 ----
+            if !root.show-recent && root.rows.length == 0 : Text {
+                x: 60px;
+                width: Tok.screen-w - 120px;
+                height: parent.height;
+                text: root.list-sub;
+                color: Tok.g5;
+                font-size: 30px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                wrap: TextWrap.word-wrap;
+            }
+
+            // ---- 搜索结果：三列封面网格 ----
+            //
+            // 服务端每页给 6 条（jm_kindle_raw.py 的 SEARCH_PER_PAGE），
+            // 正好 2 行 × 3 列铺满 1128px：
+            //   每格 376、格间 24、左右边距 30 → 30 + 376×3 + 24×2 + 30 = 1236
+            //   每行 564 → 564 × 2 = 1128
+            //
+            // ⚠️ Slint 里没有 `%` 运算符，取模要用 Math.mod、除法用 Math.floor
+            //    （见数字小键盘那段的注释）。
+            if !root.show-recent && root.rows.length > 0 : Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                background: Tok.paper;
+
+                for r[i] in root.rows : CoverCell {
+                    x: 30px + Math.mod(i, 3) * 400px;
+                    y: Math.floor(i / 3) * 564px;
+                    width: 376px;
+                    height: 564px;
+                    label: r.label;
+                    meta: r.sub;
+                    thumb: r.cover;
+                    // 封面框按图片实际比例算好（Rust 里 fit_box），
+                    // 服务端的封面大多是正方形 → 340×340。
+                    cover-w: r.cover-w;
+                    cover-h: r.cover-h;
+                    star: r.star;
+                    activated => { root.row-activated(r.idx); }
+                    star-hit => { root.star-hit(r.idx); }
+                }
+            }
+        }
+
+        // ---- 候选词栏（v6：照 Kindle 系统输入法，横排一行）----
+        //
+        // 设计稿 v6 的尺寸图（第 ⑤ 屏）：
+        //   108 + 204 × 5 + 108 = 1236　正好铺满屏宽
+        //   整条高 **142px** = 上下各 3px 黑线 + 中间 136px
+        //   翻页键 108 × 142，键里的尖角 56×56、描边 10
+        //   候选格 204 × 142，一屏 5 个；格间竖线 2px
+        //   字号 44px，**5 字以上降到 36px**（`.cand-i.sm`）
+        //
+        // 高度恒定：有没有候选词都是 142px（规则 ⑩，状态切换不重排）。
+        //
+        // ⚠️ **整块只在键盘竖起时绘制**（`if root.kb-shown`）。
+        //
+        //    踩过的坑：这一块原来是无条件画的，固定在 y=762。收起键盘后
+        //    结果区涨到 1128px（占 272~1400），而候选区那块白底就**压在列表
+        //    上面**，把中间两行结果挡掉了 —— 用户看到的是
+        //    「点完搜索，输入法那一大片空白挡住列表」。
+        //
+        // ⚠️ 键盘**不再画上边框**，由这一条的下边框兼任（设计稿 v6 第 4 条）。
+        //    两边都画的话会叠成 6px 的双线。
+        if root.kb-shown : Rectangle {
+            y: 1648px - 108px - 463px - 142px;
+            width: Tok.screen-w;
+            height: 142px;
+            background: Tok.paper;
+
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: Tok.border;
+                background: Tok.ink;
+            }
+            Rectangle {
+                x: 0;
+                y: 142px - Tok.border;
+                width: parent.width;
+                height: Tok.border;
+                background: Tok.ink;
+            }
+
+            // ---- 左尖角：上一页 ----
+            // 到头了就是灰的（规格 5：全稿唯一的禁用表达）。
+            // 点击区 108×136，够大好按。
+            Rectangle {
+                x: 0;
+                y: 3px;
+                width: 108px;
+                height: 136px;
+                background: Tok.paper;
+
+                Rectangle {
+                    x: 108px - Tok.hairline;
+                    y: 0;
+                    width: Tok.hairline;
+                    height: parent.height;
+                    background: Tok.g8;
+                }
+                IcoChevLeft {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    icon-size: 56px;
+                    stroke-w: 10px;
+                    tint: root.cand-has-prev ? Tok.ink : Tok.g9;
+                }
+                TouchArea {
+                    enabled: root.cand-has-prev;
+                    clicked => { root.ime-page(-1); }
+                }
+            }
+
+            // ---- 中间：5 个候选格，或一句说明 ----
+            if root.cand-empty : Text {
+                x: 108px;
+                y: 3px;
+                width: Tok.screen-w - 216px;
+                height: 136px;
+                text: root.cand-note;
+                color: Tok.g5;
+                font-size: 29px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                wrap: TextWrap.word-wrap;
+            }
+
+            if !root.cand-empty : Rectangle {
+                x: 108px;
+                y: 3px;
+                width: Tok.screen-w - 216px;
+                height: 136px;
+                background: Tok.paper;
+
+                for c[i] in root.cand-row-a : CandCell {
+                    x: i * 204px;
+                    y: 0;
+                    label: c;
+                    on: i == root.cand-sel;
+                    fs: root.cand-fs * 1px;
+                    hit => { root.ime-cand-hit(i); }
+                }
+
+                // 格间 2px 竖线（最后一格的右边不画，那里接着右尖角自己的左线）
+                for i in 4 : Rectangle {
+                    x: (i + 1) * 204px - Tok.hairline;
+                    y: 0;
+                    width: Tok.hairline;
+                    height: 136px;
+                    background: Tok.g8;
+                }
+            }
+
+            // ---- 右尖角：下一页 ----
+            Rectangle {
+                x: Tok.screen-w - 108px;
+                y: 3px;
+                width: 108px;
+                height: 136px;
+                background: Tok.paper;
+
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: Tok.hairline;
+                    height: parent.height;
+                    background: Tok.g8;
+                }
+                IcoChevRight {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    icon-size: 56px;
+                    stroke-w: 10px;
+                    tint: root.cand-has-next ? Tok.ink : Tok.g9;
+                }
+                TouchArea {
+                    enabled: root.cand-has-next;
+                    clicked => { root.ime-page(1); }
+                }
+            }
+        }
+
+        // ---- 键盘（463px）----
+        //
+        // 4 行 × 100 + 3 × 14 gap + 24 padding = 466；v6 去掉了上边框，
+        // 所以这里是 **463**（那 3px 由候选栏的下边框兼任，见上面）。
+        // 每行居中排（规格用 justify-content:center）
+        //
+        // ⚠️ 第 4 行 v5 改动：原「中 / 英」模式键**已删除**（没有这个概念了），
+        //    宽度分给其余键。
+        if root.kb-shown : Rectangle {
+            y: 1648px - 108px - 463px;
+            width: Tok.screen-w;
+            height: 463px;
+            background: Tok.paper;
+
+            // 三行字母。每行**居中**排（规格用 justify-content:center），
+            // 所以起点是「(1236 − 行宽) / 2」，不是固定 padding：
+            //   行1 行宽 10×100 + 9×12 = 1108 → 起点 64
+            //   行2 行宽  9×100 + 8×12 =  996 → 起点 120
+            //   行3 行宽  7×100 + 6×12 + 12 + 168 = 952 → 起点 142
+            for k[i] in root.kb-row-1 : Key {
+                x: 64px + i * 112px;
+                y: 12px;
+                label: k;
+                hit => { root.key-char(k); }
+            }
+            for k[i] in root.kb-row-2 : Key {
+                x: 120px + i * 112px;
+                y: 12px + 114px;
+                label: k;
+                hit => { root.key-char(k); }
+            }
+            for k[i] in root.kb-row-3 : Key {
+                x: 142px + i * 112px;
+                y: 12px + 228px;
+                label: k;
+                hit => { root.key-char(k); }
+            }
+            Key {
+                x: 142px + 7 * 112px;
+                y: 12px + 228px;
+                kw: 168px;
+                label: "删除";
+                fn-key: true;
+                hit => { root.key-backspace(); }
+            }
+
+            // 行 4 行宽 168+12+320+12+256+12+168 = 948 → 起点 144
+            Key {
+                x: 144px;
+                y: 12px + 342px;
+                kw: 168px;
+                label: "符号";
+                fn-key: true;
+                hit => { root.key-symbols(); }
+            }
+            Key {
+                x: 144px + 168px + 12px;
+                y: 12px + 342px;
+                kw: 320px;
+                label: "空格";
+                fn-key: true;
+                hit => { root.key-space(); }
+            }
+            Key {
+                x: 144px + 168px + 12px + 320px + 12px;
+                y: 12px + 342px;
+                kw: 256px;
+                label: "搜索";
+                fn-key: true;
+                solid: true;
+                hit => { root.key-confirm(); }
+            }
+            Key {
+                x: 144px + 168px + 12px + 320px + 12px + 256px + 12px;
+                y: 12px + 342px;
+                kw: 168px;
+                label: "收起";
+                fn-key: true;
+                hit => { root.kb-hide(); }
+            }
+        }
+
+        // ---- 结果翻页条（放下键盘后才出现）----
+        if !root.kb-shown : PagerBar {
+            y: 1648px - 108px - 140px;
+            info: root.list-info;
+            has-prev: root.has-prev;
+            has-next: root.has-next;
+            prev => { root.list-prev(); }
+            next => { root.list-next(); }
+        }
+
+        NavBar {
+            y: 1648px - 108px;
+            active: root.nav-active;
+            picked(i) => { root.nav-picked(i); }
+        }
+    }
+
+    // ================================================================
+    // 4 设置 · 第 1 页
+    //
+    // 规格 4.6：分组标题 72px，设置行 flex 均分（约 149px），
+    // 右边直接写当前值 —— **不要「点击查看」**，用户不该为了知道当前设置而点进去。
+    //
+    // 需要输数字的（如全屏刷新）**在原行上弹小键盘，不做二级页面** ——
+    // 墨水屏每多一跳都要等 1–3 秒。
+    // ================================================================
+    if root.screen == 4 : Rectangle {
+        x: 0;
+        y: 0;
+        width: Tok.screen-w;
+        height: Tok.screen-h;
+        background: Tok.paper;
+
+        AppBar {
+            y: 0;
+            title: "设置";
+            right: "第 1 / 2 页";
+            back => { root.back(); }
+        }
+
+        // 设置区：上边距 16，左右 60
+        // 3 个分组标题 × 72 + 7 行 × 148.6 = 1256 ✓（(1648−128−140−108−16) = 1256）
+        Rectangle {
+            x: 60px;
+            y: Tok.appbar-h + 16px;
+            width: Tok.screen-w - 120px;
+            height: 1256px;
+            background: transparent;
+
+            SetGroup { y: 0; title: "服务器"; }
+            SetRow {
+                y: 72px;
+                label: "地址";
+                value: root.set-addr;
+                hit => { root.set-edit-server(); }
+            }
+            SetRow {
+                y: 72px + 149px;
+                label: "连接状态";
+                value: root.set-conn;
+                hit => { root.set-recheck(); }
+            }
+
+            SetGroup { y: 72px + 298px; title: "阅读"; }
+            SetRow {
+                y: 72px + 298px + 72px;
+                label: "全屏刷新";
+                value: root.refresh-available ? root.refresh-label + "　点此修改" : "（本机不支持）";
+                hit => { root.set-edit-refresh(); }
+            }
+            SetRow {
+                y: 72px + 298px + 72px + 149px;
+                label: "翻页热区";
+                value: "左中右 三等分";
+            }
+            SetRow {
+                y: 72px + 298px + 72px + 298px;
+                label: "图片格式";
+                value: "原图 webp";
+            }
+            SetRow {
+                y: 72px + 298px + 72px + 447px;
+                label: "候选词每页";
+                value: "5 个（横排一行）";
+            }
+
+            SetGroup { y: 72px + 298px + 72px + 596px; title: "存储"; }
+            SetRow {
+                y: 72px + 298px + 72px + 596px + 72px;
+                label: "下载缓存";
+                value: root.cache-label;
+                hit => { root.set-clear-cache(); }
+            }
+        }
+
+        PagerBar {
+            y: 1648px - 108px - 140px;
+            info: "第 1 / 2 页";
+            has-prev: false;
+            has-next: true;
+            next => { root.page-right(); }
+        }
+
+        NavBar {
+            y: 1648px - 108px;
+            active: root.nav-active;
+            picked(i) => { root.nav-picked(i); }
+        }
+    }
+
+    // ================================================================
+    // 5 设置 · 关于（第 2 页）
+    // 承载从主页搬过来的信息。平时用不到，出问题时翻到这页就有。
+    // ================================================================
+    if root.screen == 5 : Rectangle {
+        x: 0;
+        y: 0;
+        width: Tok.screen-w;
+        height: Tok.screen-h;
+        background: Tok.paper;
+
+        AppBar {
+            y: 0;
+            title: "设置 · 关于";
+            right: "第 2 / 2 页";
+            back => { root.back(); }
+        }
+
+        // 2 个分组标题 × 72 + 8 行 × 139 = 1256 ✓
+        Rectangle {
+            x: 60px;
+            y: Tok.appbar-h + 16px;
+            width: Tok.screen-w - 120px;
+            height: 1256px;
+            background: transparent;
+
+            SetGroup { y: 0; title: "存储与诊断"; }
+            SetRow { y: 72px; label: "日志级别"; value: "普通"; }
+            SetRow { y: 72px + 139px; label: "检查更新"; value: root.version-label; }
+
+            SetGroup { y: 72px + 278px; title: "关于"; }
+            SetRow { y: 72px + 278px + 72px; label: "版本"; value: root.version-label; }
+            SetRow {
+                y: 72px + 278px + 72px + 139px;
+                label: "设备";
+                value: root.device-label;
+            }
+            SetRow {
+                y: 72px + 278px + 72px + 278px;
+                label: "服务端";
+                value: root.server-label;
+            }
+            SetRow {
+                y: 72px + 278px + 72px + 417px;
+                label: "拼音词条";
+                value: root.pinyin-label;
+            }
+            SetRow {
+                y: 72px + 278px + 72px + 556px;
+                label: "作者";
+                value: root.author-label;
+            }
+        }
+
+        PagerBar {
+            y: 1648px - 108px - 140px;
+            info: "第 2 / 2 页";
+            has-prev: true;
+            has-next: false;
+            prev => { root.page-left(); }
+        }
+
+        NavBar {
+            y: 1648px - 108px;
+            active: root.nav-active;
+            picked(i) => { root.nav-picked(i); }
+        }
+    }
+
+    // ================================================================
+    // 2 主页
+    //
+    // 规格 4.4：只有五样 —— Logo / 名字 / 作者 / 开源地址 / 快速入门按钮。
+    // 其余信息全部移到设置第 2 页。
+    //
+    // ⚠️ 开源地址那块**暂时不显示**（用户还没建那个仓库）——
+    //    等有了再补，位置就在作者和按钮之间。
+    // ================================================================
+    if root.screen == 2 : Rectangle {
+        x: 0;
+        y: 0;
+        width: Tok.screen-w;
+        height: Tok.screen-h;
+        background: Tok.paper;
+
+        // 内容垂直居中，左右 padding 100。
+        //
+        // 居中不是用「自适应」算的，是**先把内容总高算出来再定起点** ——
+        // 内容一共 826px（Logo 300 + 52 + 名字 178 + 26 + 作者 44 + 56 + 按钮 170），
+        // 可用区是 1648 − 108（底栏）− 60（底部留白）= 1480，
+        // 所以起点 = (1480 − 826) / 2 = 327。往下每一块按 margin 累加。
+        //
+        // 这么算是因为 Slint 没有「垂直居中一组元素」的写法，
+        // 而规格给的又全是绝对像素 —— 干脆算成绝对坐标，和规格一一对应。
+        Rectangle {
+            x: 100px;
+            y: 0;
+            width: Tok.screen-w - 200px;
+            height: 1480px;
+            background: transparent;
+
+            // Logo 框 300×300，内含 190px 的书
+            Rectangle {
+                x: (parent.width - 300px) / 2;
+                y: 327px;
+                width: 300px;
+                height: 300px;
+                border-width: Tok.border;
+                border-color: Tok.ink;
+                background: Tok.paper;
+
+                IcoBook {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    icon-size: 190px;
+                    stroke-w: 6px;
+                    tint: Tok.ink;
+                }
+            }
+
+            Text {
+                x: 0;
+                y: 679px;
+                width: parent.width;
+                height: 178px;
+                text: "JMcomic\nfor kindle";
+                color: Tok.ink;
+                font-size: 74px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            Text {
+                x: 0;
+                y: 883px;
+                width: parent.width;
+                height: 44px;
+                text: root.author-label;
+                color: Tok.g5;
+                font-size: 32px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            // 「快速入门」——整屏最大的一块黑，位置固定（规格 5：主要动作每屏至多一个）
+            Rectangle {
+                x: 0;
+                y: 983px;
+                width: parent.width;
+                height: 170px;
+                background: Tok.ink;
+
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "快速入门";
+                    color: Tok.paper;
+                    font-size: 52px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                TouchArea {
+                    clicked => { root.guide-prev(); }
+                }
+            }
+
+            // 「按本子 ID 打开」——次级动作，**空心**（只有描边，不反白）。
+            //
+            // 留着它是因为用户的要求是「另加不删减」：这个入口原来在首页，
+            // 新设计的底栏五项里没有它的位置，但功能不该因此消失。
+            // 用空心而非反白，是为了不跟「快速入门」抢主要动作的位置
+            // （规格 5：每屏至多一个主要动作）。
+            Rectangle {
+                x: 0;
+                y: 1183px;
+                width: parent.width;
+                height: 130px;
+                background: Tok.paper;
+                border-width: Tok.border;
+                border-color: Tok.ink;
+
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "按本子 ID 打开";
+                    color: Tok.ink;
+                    font-size: 40px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                TouchArea {
+                    clicked => { root.open-by-id(); }
+                }
+            }
+        }
+
+        // ---- 退出程序：**整个页面右上角** ----
+        //
+        // ⚠️ 之前漏了整个退出入口：回调 `quit-requested` 在 AppWindow 里声明了、
+        //    Rust 也接好了（`Cmd::Quit` → `process::exit(0)`），
+        //    但**界面上没有任何地方调它** —— 用户进了应用就出不去，
+        //    只能长按电源键强制重启。规格第 10 节的「未决项 #7」问的就是这个。
+        //
+        // 为什么放「整个页面的右上角」，而不是贴在某个按钮上：
+        //   ① 这是全站**唯一**一个会终止进程的动作，误触代价最大
+        //      （要重新走一遍 KUAL 启动，还要等十几秒的墨水屏刷新）。
+        //      角落是手指最不容易顺手碰到的地方。
+        //   ② 它是一个**全局动作**，不属于主页内容。挂在「快速入门」上会被读成
+        //      「退出这个按钮 / 退出引导」，语义是错的。
+        //   ③ 角落位置和内容区不打架 —— 内容区左右各留 100px 页边距，
+        //      图标落在页边距里，以后主页加东西也不会挤到它。
+        //
+        // 用电源符号（`IcoPower`，设计稿 icon-exit.html 的「丙」）而不是
+        // 「门 + 箭头」：应用里已经有「退出阅读 → 返回书架」了，
+        // 两者都用箭头形会看错；电源符号明确是「关掉程序」。
+        //
+        // 外层框 110×110 是有意为之（规格 6：可点区 ≥100px）——
+        // 66px 的图标裸着点太小。3px 描边和「按本子 ID 打开」保持同一套语言。
+        Rectangle {
+            x: Tok.screen-w - 36px - 110px;
+            y: 28px;
+            width: 110px;
+            height: 110px;
+            background: Tok.paper;
+            border-width: Tok.border;
+            border-color: Tok.ink;
+
+            IcoPower {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                icon-size: 66px;
+                stroke-w: 7px;
+                tint: Tok.ink;
+            }
+
+            TouchArea {
+                clicked => { root.quit-requested(); }
+            }
+        }
+
+        NavBar {
+            y: 1648px - 108px;
+            active: root.nav-active;
+            picked(i) => { root.nav-picked(i); }
+        }
+    }
+
+    // ================================================================
+    // 3 收藏
+    //
+    // 规格 4.3：
+    //   [顶栏]   128  标题「收藏」，右「共 N 部」
+    //   [筛选条] 130  胶囊 76px 高 / 3px 边框
+    //   [列表]   flex 8 行均分（约 143px/行）
+    //   [翻页条] 140
+    //   [底栏]   108
+    //
+    // 这一页装的都是收藏过的东西，所以**全是实心星**。
+    // 点星 = 取消收藏，点行本身 = 进作品 —— 两个热区，星只占右边一小块。
+    // ================================================================
+    if root.screen == 3 : Rectangle {
+        x: 0;
+        y: 0;
+        width: Tok.screen-w;
+        height: Tok.screen-h;
+        background: Tok.paper;
+
+        AppBar {
+            y: 0;
+            title: "收藏";
+            right: root.fav-right;
+            back => { root.back(); }
+        }
+
+        // 筛选条：两个胶囊
+        Rectangle {
+            x: 40px;
+            y: Tok.appbar-h;
+            width: Tok.screen-w - 80px;
+            height: 130px;
+            background: transparent;
+
+            Rectangle {
+                x: 0;
+                y: (parent.height - self.height) / 2;
+                width: 340px;
+                height: 76px;
+                background: root.fav-tab == 0 ? Tok.ink : Tok.paper;
+                border-width: Tok.border;
+                border-color: Tok.ink;
+
+                Text {
+                    text: "收藏的作品";
+                    color: root.fav-tab == 0 ? Tok.paper : Tok.ink;
+                    font-size: 30px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: parent.width;
+                    height: parent.height;
+                }
+                TouchArea {
+                    clicked => { root.fav-tab-picked(0); }
+                }
+            }
+
+            Rectangle {
+                x: 340px + 20px;
+                y: (parent.height - self.height) / 2;
+                width: 340px;
+                height: 76px;
+                background: root.fav-tab == 1 ? Tok.ink : Tok.paper;
+                border-width: Tok.border;
+                border-color: Tok.ink;
+
+                Text {
+                    text: "收藏的单话";
+                    color: root.fav-tab == 1 ? Tok.paper : Tok.ink;
+                    font-size: 30px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: parent.width;
+                    height: parent.height;
+                }
+                TouchArea {
+                    clicked => { root.fav-tab-picked(1); }
+                }
+            }
+        }
+
+        // 列表：8 行均分（(1648−128−130−140−108) / 8 = 142.75）
+        for r[i] in root.rows : ListLine {
+            y: 258px + i * (1142px / 8);
+            width: Tok.screen-w;
+            height: 1142px / 8;
+            label: r.label;
+            meta: r.sub;
+            // 单话那栏：上面本子标题、下面「第 N 话」。作品那栏是空串，单行。
+            sub-label: r.sub-label;
+            thumb: r.cover;
+            star: r.star;
+            activated => { root.row-activated(r.idx); }
+            star-hit => { root.star-hit(r.idx); }
+        }
+
+        PagerBar {
+            y: 1648px - 108px - 140px;
+            info: root.list-info;
+            has-prev: root.has-prev;
+            has-next: root.has-next;
+            prev => { root.list-prev(); }
+            next => { root.list-next(); }
+        }
+
+        NavBar {
+            y: 1648px - 108px;
+            active: root.nav-active;
+            picked(i) => { root.nav-picked(i); }
+        }
+    }
+
+    // ================================================================
+    // 6 快速入门（两页）
+    //
+    // 规格 4.5：页头 132 / 步骤区 space-evenly / 翻页条 140 / 底栏 108
+    //
+    // 第 1 步挂「必须先做」标签，因为**新手最常见的失败就是忘了开服务端**，
+    // 然后以为软件坏了。
+    // ================================================================
+    if root.screen == 6 : Rectangle {
+        x: 0;
+        y: 0;
+        width: Tok.screen-w;
+        height: Tok.screen-h;
+        background: Tok.paper;
+
+        Rectangle {
+            x: 60px;
+            y: 0;
+            width: Tok.screen-w - 120px;
+            height: 132px;
+            background: transparent;
+
+            Text {
+                x: 0;
+                y: 22px;
+                width: parent.width - 200px;
+                height: 110px;
+                text: root.guide-page == 0 ? "快速入门（一）先让它跑起来" : "快速入门（二）怎么看漫画";
+                color: Tok.ink;
+                font-size: 48px;
+                font-weight: 700;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            Text {
+                width: 180px;
+                height: 110px;
+                y: 22px;
+                x: parent.width - self.width;
+                text: root.guide-page == 0 ? "第 1 / 2 页" : "第 2 / 2 页";
+                color: Tok.g5;
+                font-size: Tok.fs-meta;
+                horizontal-alignment: TextHorizontalAlignment.right;
+                vertical-alignment: TextVerticalAlignment.bottom;
+                overflow: elide;
+            }
+
+            Rectangle {
+                x: 0;
+                y: parent.height - Tok.border;
+                width: parent.width;
+                height: Tok.border;
+                background: Tok.ink;
+            }
+        }
+
+        // 步骤区
+        Rectangle {
+            x: 60px;
+            y: 132px;
+            width: Tok.screen-w - 120px;
+            height: 1268px;
+            background: transparent;
+
+            if root.guide-page == 0 : Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                background: transparent;
+
+                GuideStep {
+                    y: 60px;
+                    height: 340px;
+                    num: 1;
+                    title: "在电脑上启动服务端";
+                    tag: "必须先做";
+                    desc: "打开命令行，运行下面这行。窗口里出现 Listening ... 8001 就说明起来了，别关这个窗口。这一步不做，Kindle 上所有按钮点了都没反应。";
+                    code: "python jm_kindle_raw.py";
+                }
+                GuideStep {
+                    y: 460px;
+                    height: 300px;
+                    num: 2;
+                    title: "确认 Kindle 和电脑在同一个 Wi-Fi";
+                    desc: "两边连同一个路由器就行，不需要插线。电脑的 IP 这样查：按 Win+R 输 cmd，再输 ipconfig，找「IPv4 地址」。";
+                }
+                GuideStep {
+                    y: 820px;
+                    height: 340px;
+                    num: 3;
+                    title: "回首页，看最上面那条黑条";
+                    desc: "写「服务器 已连接」＝一切都好，可以直接用了。写「服务器 未连接」＝点黑条右边的「重新连接」；还不行就去设置里手填地址。";
+                }
+            }
+
+            if root.guide-page == 1 : Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                background: transparent;
+
+                GuideStep {
+                    y: 40px;
+                    height: 260px;
+                    num: 4;
+                    title: "找漫画";
+                    desc: "底部点放大镜：敲字母，想搜中文就点上面的候选词，不想就按「搜索」。或者点钟表（历史），接着上次看过的继续。";
+                }
+                GuideStep {
+                    y: 340px;
+                    height: 220px;
+                    num: 5;
+                    title: "挑一话开始看";
+                    desc: "点作品，出现章节列表；点某一话就进阅读器了。";
+                }
+                GuideStep {
+                    y: 600px;
+                    height: 320px;
+                    num: 6;
+                    title: "阅读器里怎么操作";
+                    desc: "屏幕上没有按钮，全靠点位置：点画面左边 ＝ 上一页；点画面右边 ＝ 下一页；点画面中间偏下 ＝ 打开菜单（跳页 · 章节 · 收藏 · 退出阅读）。";
+                }
+                GuideStep {
+                    y: 960px;
+                    height: 260px;
+                    num: 7;
+                    title: "觉得残影重怎么办";
+                    desc: "在阅读菜单里选「全屏刷新」，再选「每 5 页」。另外记住：墨水屏每翻一页要等 1–3 秒，还会闪一下，这是正常的，不是卡住了。";
+                }
+            }
+        }
+
+        PagerBar {
+            y: 1648px - 108px - 140px;
+            info: root.guide-page == 0 ? "第 1 / 2 页" : "第 2 / 2 页";
+            has-prev: root.guide-page == 1;
+            has-next: root.guide-page == 0;
+            prev => { root.guide-prev(); }
+            next => { root.guide-next(); }
+        }
+
+        NavBar {
+            y: 1648px - 108px;
+            active: root.nav-active;
+            picked(i) => { root.nav-picked(i); }
+        }
+    }
+
+    // ================================================================
+    // 7 本子详情 / 章节目录
+    //
+    // ⚠️ 规格书**漏画了这一屏** —— 但它绕不开：搜索 → 点作品 → 章节列表 →
+    //    点某一话，中间那一环就是它。所以按同一套设计语言补出来：
+    //    顶栏 + 封面/信息 + 标签 + 章节两列 + 翻页条 + 底栏。
+    // ================================================================
+    if root.screen == 7 : Rectangle {
+        x: 0;
+        y: 0;
+        width: Tok.screen-w;
+        height: Tok.screen-h;
+        background: Tok.paper;
+
+        // 顶栏**不再放漫画名**（用户要求：名字要和封面在同一块里）。
+        // 这里只留一个中性标题，真正的主角在下面和封面并排。
+        AppBar {
+            y: 0;
+            title: "作品详情";
+            right: root.list-info;
+            back => { root.back(); }
+        }
+
+        // ---- 封面 + 漫画名 + 作者/车牌号（同一块）----
+        //
+        // 高度 340 = 封面上限 332 + 余量。**不能比封面框矮** ——
+        // 之前这里写 300，而封面框最高 332，超出的部分压在下面的标签上。
+        Rectangle {
+            x: 60px;
+            y: 148px;
+            width: Tok.screen-w - 120px;
+            height: 340px;
+            background: transparent;
+
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: root.album-cover-w * 1px;
+                height: root.album-cover-h * 1px;
+                border-width: Tok.border;
+                border-color: Tok.ink;
+                background: Tok.paper;
+
+                if root.album-cover.width > 0 : Image {
+                    x: 2px;
+                    y: 2px;
+                    width: parent.width - 4px;
+                    height: parent.height - 4px;
+                    source: root.album-cover;
+                    image-fit: contain;
+                }
+            }
+
+            // 漫画名：紧挨封面右侧，可以折行（本子名普遍很长）
+            Text {
+                x: root.album-cover-w * 1px + 30px;
+                y: 0;
+                width: parent.width - root.album-cover-w * 1px - 30px;
+                height: 200px;
+                text: root.album-title;
+                color: Tok.ink;
+                font-size: 38px;
+                font-weight: 700;
+                wrap: TextWrap.word-wrap;
+                vertical-alignment: TextVerticalAlignment.top;
+            }
+
+            // 作者 + 车牌号：**浅灰小字**，紧跟在名字下面
+            Text {
+                x: root.album-cover-w * 1px + 30px;
+                y: 216px;
+                width: parent.width - root.album-cover-w * 1px - 30px;
+                height: 44px;
+                text: root.album-byline;
+                color: Tok.g5;
+                font-size: 24px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        // ---- 标签（通栏，最多两行）----
+        //
+        // t.x / t.y 是**相对于标签区左上角的偏移**（见 tag_layout 的注释），
+        // 区域原点就是下面这个 60px / 508px。
+        for t[i] in root.album-tags : Rectangle {
+            x: 60px + t.x * 1px;
+            y: 508px + t.y * 1px;
+            width: t.w * 1px;
+            height: 66px;
+            background: Tok.paper;
+            border-width: Tok.hairline;
+            border-color: Tok.ink;
+
+            Text {
+                text: t.label;
+                color: Tok.ink;
+                font-size: 28px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                width: parent.width;
+                height: parent.height;
+                overflow: elide;
+            }
+            TouchArea {
+                clicked => { root.tag-activated(t.idx); }
+            }
+        }
+
+        // ---- 目录区标题 ----
+        Rectangle {
+            x: 60px;
+            y: 668px;
+            width: Tok.screen-w - 120px;
+            height: 48px;
+            background: transparent;
+
+            Text {
+                x: 0;
+                width: 300px;
+                height: parent.height;
+                text: "目录";
+                color: Tok.ink;
+                font-size: 34px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            Text {
+                width: 600px;
+                height: parent.height;
+                x: parent.width - self.width;
+                text: "点某一话开始看";
+                color: Tok.g5;
+                font-size: Tok.fs-meta;
+                horizontal-alignment: TextHorizontalAlignment.right;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        // ---- 章节两列 ----
+        //
+        // 12 个/页 = 2 列 × 6 行（和 CHAPTERS_PER_PAGE 一致）。
+        //
+        // 行高 112、起点 726，算下来 726 + 6×112 = 1398 —— 正好停在翻页条
+        // （1400）上面。原来起点 656、行高 150，6 行要到 1556，
+        // **最后两行被翻页条整个盖住了**，点都点不到。
+        //
+        // 章节没有封面，所以 show-thumb: false —— 不然每行左边挂一个空框，
+        // 看着像图没加载出来。
+        for r[i] in root.col-left : ListLine {
+            x: 60px;
+            y: 726px + i * 112px;
+            width: 540px;
+            height: 112px;
+            label: r.label;
+            meta: r.sub;
+            star: r.star;
+            show-thumb: false;
+            activated => { root.row-activated(r.idx); }
+            star-hit => { root.star-hit(r.idx); }
+        }
+        for r[i] in root.col-right : ListLine {
+            x: 636px;
+            y: 726px + i * 112px;
+            width: 540px;
+            height: 112px;
+            label: r.label;
+            meta: r.sub;
+            star: r.star;
+            show-thumb: false;
+            activated => { root.row-activated(r.idx); }
+            star-hit => { root.star-hit(r.idx); }
+        }
+
+        PagerBar {
+            y: 1648px - 108px - 140px;
+            info: root.list-info;
+            has-prev: root.has-prev;
+            has-next: root.has-next;
+            prev => { root.list-prev(); }
+            next => { root.list-next(); }
+        }
+
+        NavBar {
+            y: 1648px - 108px;
+            active: root.nav-active;
+            picked(i) => { root.nav-picked(i); }
+        }
+    }
+
+    // ================================================================
+    // 8 阅读器（真·全屏）+ 覆盖式菜单
+    //
+    // 规格 4.8：1236 × 1648 全是图片，**没有底栏、没有状态条、没有页码、没有按钮**。
+    //
+    // 热区（**用户拍板：中条只在下半屏**）：
+    //   左 1/3 全高  → 上一页
+    //   右 1/3 全高  → 下一页
+    //   中 1/3 下半  → 打开菜单（上半中间是死区，不响应）
+    //
+    // 菜单是**覆盖式**（规格 4.10）：图片保持 1236×1648 原样不动，
+    // 菜单画在上面一层，上方仍露出 690px 漫画，可以边看边调。
+    // **绝不能压缩图片区** —— 那会触发整屏重排 = 整屏闪。
+    // ================================================================
+    if root.screen == 8 : Rectangle {
+        x: 0;
+        y: 0;
+        width: Tok.screen-w;
+        height: Tok.screen-h;
+        background: Tok.paper;
+
+        Image {
+            x: 0;
+            y: 0;
+            width: Tok.screen-w;
+            height: Tok.screen-h;
+            source: root.page-image;
+            image-fit: contain;
+        }
+
+        // ---- 热区 ----
+        TouchArea {
+            x: 0;
+            y: 0;
+            width: 412px;
+            height: Tok.screen-h;
+            clicked => { root.reader-prev(); }
+        }
+        TouchArea {
+            x: 824px;
+            y: 0;
+            width: 412px;
+            height: Tok.screen-h;
+            clicked => { root.reader-next(); }
+        }
+        // 中条只到下半屏。上半中间不铺 TouchArea，是块死区 ——
+        // 这样翻页时戳到画面正中不会老是弹菜单。
+        TouchArea {
+            x: 412px;
+            y: 824px;
+            width: 412px;
+            height: 824px;
+            clicked => { root.reader-menu-toggle(); }
+        }
+
+        // ---- 覆盖式菜单（1080px = 96 + 7×122 + 130）----
+        //
+        // 原规格是 958（6 行），加了「退出程序」之后多一行 → 1080。
+        // 上方仍露出 1648 − 1080 = **568px** 的漫画，够看清当前在翻哪一页。
+        if root.reader-menu : Rectangle {
+            x: 0;
+            y: 1648px - 1080px;
+            width: Tok.screen-w;
+            height: 1080px;
+            background: Tok.paper;
+
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: Tok.border;
+                background: Tok.ink;
+            }
+
+            // 标题栏
+            Rectangle {
+                y: 0;
+                width: Tok.screen-w;
+                height: 96px;
+                background: Tok.paper;
+
+                Text {
+                    x: 50px;
+                    width: 500px;
+                    height: parent.height;
+                    text: "阅读菜单";
+                    color: Tok.ink;
+                    font-size: 34px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Text {
+                    width: 600px;
+                    height: parent.height;
+                    x: parent.width - 50px - self.width;
+                    text: root.reader-pos;
+                    color: Tok.g5;
+                    font-size: 29px;
+                    horizontal-alignment: TextHorizontalAlignment.right;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Rectangle {
+                    x: 0;
+                    y: parent.height - Tok.border;
+                    width: parent.width;
+                    height: Tok.border;
+                    background: Tok.ink;
+                }
+            }
+
+            // 上一页 / 下一页（对半）
+            MenuRow2 {
+                y: 96px;
+                left-label: "上一页";
+                right-label: "下一页";
+                left-hit => { root.reader-prev(); }
+                right-hit => { root.reader-next(); }
+            }
+
+            MenuRow {
+                y: 96px + 122px;
+                label: "跳转到页";
+                value: "输入页码";
+                hit => { root.reader-goto-page(); }
+            }
+            MenuRow {
+                y: 96px + 244px;
+                label: "章节列表";
+                value: root.reader-chapters;
+                hit => { root.reader-open-chapters(); }
+            }
+            MenuRow {
+                y: 96px + 366px;
+                label: "全屏刷新";
+                value: root.refresh-available ? root.refresh-label : "（本机不支持）";
+                hit => { root.reader-refresh(); }
+            }
+
+            // 收藏本话 —— 两态：空心星+灰字 / 实心星+黑字
+            //
+            // ⚠️ **文字也要跟着变深**。理由：一个小星星的黑白差别隔着距离看不太清，
+            //    文字从灰变黑是一大块面积的变化，扫一眼就能确认。
+            Rectangle {
+                y: 96px + 488px;
+                width: Tok.screen-w;
+                height: 122px;
+                background: Tok.paper;
+
+                Text {
+                    x: 50px;
+                    width: 400px;
+                    height: parent.height;
+                    text: "收藏本话";
+                    color: Tok.ink;
+                    font-size: 40px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    width: 300px;
+                    height: parent.height;
+                    x: parent.width - 50px - 60px - self.width;
+                    text: root.reader-starred ? "已收藏" : "未收藏";
+                    color: root.reader-starred ? Tok.ink : Tok.g5;
+                    font-size: 30px;
+                    horizontal-alignment: TextHorizontalAlignment.right;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    width: 46px;
+                    height: 46px;
+                    x: parent.width - 50px - self.width;
+                    y: (parent.height - self.height) / 2;
+                    background: transparent;
+
+                    // ⚠️ 同 ListLine：**不要传 `stroke-w`**，由 IcoStar 按
+                    //    icon-size 等比推导（见 icons.slint 的说明）。
+                    IcoStar {
+                        icon-size: 46px;
+                        solid: root.reader-starred;
+                        tint: Tok.ink;
+                    }
+                }
+                Rectangle {
+                    x: 0;
+                    y: parent.height - Tok.hairline;
+                    width: parent.width;
+                    height: Tok.hairline;
+                    background: Tok.g8;
+                }
+
+                TouchArea {
+                    clicked => { root.reader-star-toggle(); }
+                }
+            }
+
+            MenuRow {
+                y: 96px + 610px;
+                label: "退出阅读";
+                value: "返回书架";
+                hit => { root.reader-exit(); }
+            }
+
+            // 「退出程序」——规格第 10 节未决项 #7 问的就是这一行要不要加。
+            // **要加。** 阅读器是整屏无按钮的，如果这里没有出口，
+            // 用户从阅读状态想关掉应用得先退回书架、再回主页、再点退出 ——
+            // 而「退出阅读」只负责回书架，不是退出应用，两者容易混。
+            MenuRow {
+                y: 96px + 732px;
+                label: "退出程序";
+                value: "回到 Kindle";
+                hit => { root.quit-requested(); }
+            }
+
+            // 关闭菜单（反白，无下边框）
+            Rectangle {
+                y: 96px + 854px;
+                width: Tok.screen-w;
+                height: 130px;
+                background: Tok.ink;
+
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "关闭菜单";
+                    color: Tok.paper;
+                    font-size: 38px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchArea {
+                    clicked => { root.reader-menu-toggle(); }
+                }
+            }
+        }
+
+        // ---- 首次进阅读器的一次性说明（规格 4.9）----
+        if root.reader-hint : Rectangle {
+            x: 0;
+            y: 0;
+            width: Tok.screen-w;
+            height: Tok.screen-h;
+            background: transparent;
+
+            // 面板贴底，上方露出 250px 漫画
+            Rectangle {
+                y: 1648px - 1398px;
+                width: Tok.screen-w;
+                height: 1398px;
+                background: Tok.paper;
+
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: Tok.border;
+                    background: Tok.ink;
+                }
+
+                Text {
+                    x: 60px;
+                    y: 54px;
+                    width: Tok.screen-w - 120px;
+                    height: 76px;
+                    text: "怎么翻页";
+                    color: Tok.ink;
+                    font-size: 58px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    x: 60px;
+                    y: 144px;
+                    width: Tok.screen-w - 120px;
+                    height: 80px;
+                    text: "屏幕上看不到按钮，用单击位置来操作。下面这张图就是全屏画面的分区。";
+                    color: Tok.g5;
+                    font-size: 30px;
+                    wrap: TextWrap.word-wrap;
+                }
+
+                // 左：分区示意图
+                Rectangle {
+                    x: 60px;
+                    y: 260px;
+                    width: 300px;
+                    height: 400px;
+                    border-width: Tok.border;
+                    border-color: Tok.ink;
+                    background: Tok.paper;
+
+                    Text {
+                        x: 0;
+                        y: 0;
+                        width: 100px;
+                        height: 400px;
+                        text: "上一页";
+                        color: Tok.g5;
+                        font-size: 26px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        wrap: TextWrap.word-wrap;
+                    }
+                    Text {
+                        x: 200px;
+                        y: 0;
+                        width: 100px;
+                        height: 400px;
+                        text: "下一页";
+                        color: Tok.g5;
+                        font-size: 26px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        wrap: TextWrap.word-wrap;
+                    }
+                    Rectangle {
+                        x: 100px;
+                        y: 200px;
+                        width: 100px;
+                        height: 200px;
+                        border-width: Tok.hairline;
+                        border-color: Tok.g8;
+                        background: Tok.paper;
+
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: "菜单";
+                            color: Tok.g5;
+                            font-size: 24px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // 右：三条说明
+                Rectangle {
+                    x: 60px + 300px + 56px;
+                    y: 300px;
+                    width: 640px;
+                    height: 360px;
+                    background: transparent;
+
+                    Text {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: 50px;
+                        text: "点画面左边";
+                        color: Tok.ink;
+                        font-size: 40px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        x: 0;
+                        y: 44px;
+                        width: parent.width;
+                        height: 44px;
+                        text: "翻到上一页";
+                        color: Tok.g5;
+                        font-size: Tok.fs-meta;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        x: 0;
+                        y: 130px;
+                        width: parent.width;
+                        height: 50px;
+                        text: "点画面右边";
+                        color: Tok.ink;
+                        font-size: 40px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        x: 0;
+                        y: 174px;
+                        width: parent.width;
+                        height: 44px;
+                        text: "翻到下一页";
+                        color: Tok.g5;
+                        font-size: Tok.fs-meta;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        x: 0;
+                        y: 260px;
+                        width: parent.width;
+                        height: 50px;
+                        text: "点画面中下方";
+                        color: Tok.ink;
+                        font-size: 40px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        x: 0;
+                        y: 304px;
+                        width: parent.width;
+                        height: 60px;
+                        text: "打开菜单：跳页 · 章节 · 收藏 · 退出";
+                        color: Tok.g5;
+                        font-size: Tok.fs-meta;
+                        vertical-alignment: center;
+                        wrap: TextWrap.word-wrap;
+                    }
+                }
+
+                // 「知道了」
+                Rectangle {
+                    x: 60px;
+                    y: 1398px - 60px - 150px;
+                    width: Tok.screen-w - 120px;
+                    height: 150px;
+                    background: Tok.ink;
+
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "知道了";
+                        color: Tok.paper;
+                        font-size: 46px;
+                        letter-spacing: 6px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        clicked => { root.reader-hint-dismiss(); }
+                    }
+                }
+            }
+        }
+
+        // ---- 加载界面（「看的时候」的反馈）----
+        //
+        // 翻一页要传几百 KB，真机上好几秒。原来这段时间**屏幕上什么都不变**，
+        // 用户以为点了没反应。现在盖一块居中的面板：文字 + 六个方块。
+        //
+        // 为什么不铺满整屏：上一页还留在屏幕上，整屏刷白再刷出下一页，
+        // 墨水屏要多闪一次；只盖中间一块，周围还能看见自己在第几页。
+        //
+        // 不画转圈动画（规格：墨水屏上会留一串残影）。
+        // 首次进阅读器时不盖 —— 那一屏有一次性的「怎么翻页」说明，
+        // 两块面板会叠在一起；第一页在说明背后默默加载。
+        // 尺寸按用户反馈**收小**过一轮：原来 900×300 盖住了太多画面。
+        // 现在 560×196，大约只占整屏的 3/4 宽、1/8 高，周围留出更多漫画。
+        if root.loading && !root.reader-hint : Rectangle {
+            x: (Tok.screen-w - 560px) / 2;
+            y: (Tok.screen-h - 196px) / 2;
+            width: 560px;
+            height: 196px;
+            background: Tok.paper;
+            border-width: Tok.border;
+            border-color: Tok.ink;
+
+            Text {
+                x: 24px;
+                y: 16px;
+                width: parent.width - 48px;
+                height: 52px;
+                text: root.loading-text;
+                color: Tok.ink;
+                font-size: 34px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            // 六个方块：已加载的填黑。只有翻页有可量化的进度，
+            // 其余加载（打开章节等）保持空心，靠上面的文字说明。
+            // 6×32 + 5×24 = 312，在 560 宽的框里居中。
+            for i in 6 : Rectangle {
+                width: 32px;
+                height: 32px;
+                x: (parent.width - (6 * 32px + 5 * 24px)) / 2 + i * 56px;
+                y: 84px;
+                border-width: 3px;
+                border-color: Tok.ink;
+                background: i < root.loaded-count ? Tok.ink : Tok.paper;
+            }
+
+            Text {
+                x: 24px;
+                y: 132px;
+                width: parent.width - 48px;
+                height: 44px;
+                text: "首次加载会慢一点";
+                color: Tok.g5;
+                font-size: 24px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+
+    // ================================================================
+    // 9 出错页 / 加载态（规格 4.11）
+    //
+    // 出错页把**地址、原因、上次成功时间**全摊开，用户不用去翻日志。
+    // 加载进度用**六个方块**代替转圈 —— 循环动画在墨水屏上只会留一串残影。
+    //
+    // ⚠️ 这一屏**没有底栏**（照规格的稿子）：它是阻塞态，出口就是那个「重试」。
+    // ================================================================
+    if root.screen == 9 : Rectangle {
+        x: 0;
+        y: 0;
+        width: Tok.screen-w;
+        height: Tok.screen-h;
+        background: Tok.paper;
+
+        StatusBar {
+            y: 0;
+            text: root.conn-text;
+            retry => { root.retry(); }
+        }
+
+        // 「退出程序」——出错页**必须自己带一个**。
+        //
+        // ⚠️ 踩过的坑：这一屏原来既没有底栏、也没有退出入口，而全站的退出
+        //    只在**主页右上角**和阅读器菜单里。断网时用户到不了主页，
+        //    于是连着重试几次都失败之后**根本出不去**，只能长按电源键强制重启。
+        //    这和 HANDOVER 第 1.7 节记的那次事故是同一个形状：
+        //    「回调接好了，但界面上没有任何地方调它」。
+        //
+        // 位置和其他屏一致：整个界面的右上角。这一屏顶部有一条 88px 的状态条，
+        // 所以往下让开它（y = 88 + 20），不和状态条叠在一起。
+        Rectangle {
+            x: Tok.screen-w - 36px - 110px;
+            y: 88px + 20px;
+            width: 110px;
+            height: 110px;
+            background: Tok.paper;
+            border-width: Tok.border;
+            border-color: Tok.ink;
+
+            IcoPower {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                icon-size: 66px;
+                stroke-w: 7px;
+                tint: Tok.ink;
+            }
+
+            TouchArea {
+                clicked => { root.quit-requested(); }
+            }
+        }
+
+        Text {
+            x: 60px;
+            y: 88px + 70px;
+            // 右边让开右上角那个退出按钮 —— 不让的话长标题会从它底下穿过去。
+            // 236 = 60（右边距）+ 110（按钮）+ 30（间距）+ 36（按钮的右边距）
+            width: Tok.screen-w - 236px;
+            height: 80px;
+            text: root.err-title;
+            color: Tok.ink;
+            font-size: 64px;
+            font-weight: 700;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Text {
+            x: 60px;
+            y: 88px + 70px + 96px;
+            width: Tok.screen-w - 120px;
+            height: 120px;
+            text: root.err-desc;
+            color: Tok.g5;
+            font-size: 34px;
+            wrap: TextWrap.word-wrap;
+        }
+
+        // 信息框：地址 / 状态 / 上次成功
+        Rectangle {
+            x: 60px;
+            y: 88px + 70px + 96px + 130px;
+            width: Tok.screen-w - 120px;
+            height: 288px;
+            border-width: Tok.border;
+            border-color: Tok.ink;
+            background: Tok.paper;
+
+            InfoLine { y: 0; label: "地址"; value: root.err-addr; }
+            InfoLine { y: 96px; label: "状态"; value: root.err-state; }
+            InfoLine { y: 192px; label: "上次成功"; value: root.err-last; }
+        }
+
+        // 「重试」——整屏最大的一块黑，位置固定
+        Rectangle {
+            x: 60px;
+            y: 88px + 70px + 96px + 130px + 288px + 40px;
+            width: Tok.screen-w - 120px;
+            height: 150px;
+            background: Tok.ink;
+
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: "重试";
+                color: Tok.paper;
+                font-size: 46px;
+                letter-spacing: 4px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            TouchArea {
+                clicked => { root.retry(); }
+            }
+        }
+
+        // 加载区（360px，上边框 3px）
+        if root.loading : Rectangle {
+            x: 0;
+            y: 1648px - 360px;
+            width: Tok.screen-w;
+            height: 360px;
+            background: Tok.paper;
+
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: Tok.border;
+                background: Tok.ink;
+            }
+
+            Text {
+                x: 60px;
+                y: 36px;
+                width: Tok.screen-w - 120px;
+                height: 50px;
+                text: "加载中一律用「文字 + 方块」，没有转圈动画";
+                color: Tok.g5;
+                font-size: 30px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            Rectangle {
+                x: 60px;
+                y: 110px;
+                width: Tok.screen-w - 120px;
+                height: 130px;
+                border-width: Tok.border;
+                border-color: Tok.ink;
+                background: Tok.paper;
+
+                Text {
+                    x: 34px;
+                    width: parent.width - 400px;
+                    height: parent.height;
+                    text: root.loading-text;
+                    color: Tok.ink;
+                    font-size: 34px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                // 六个方块，已加载的填黑
+                for i in 6 : Rectangle {
+                    width: 30px;
+                    height: 30px;
+                    x: parent.width - 34px - (6 - i) * 44px;
+                    y: (parent.height - self.height) / 2;
+                    border-width: 2px;
+                    border-color: Tok.ink;
+                    background: i < root.loaded-count ? Tok.ink : Tok.paper;
+                }
+            }
+        }
+
+        // ⚠️ **出错页也要有底栏。**
+        //
+        // 踩过的坑：这一屏原先没有底栏，断网时用户就只剩「重试」一个按钮 ——
+        // 而底栏的「设置」正是出错页那段说明里让他去做的事
+        // （「或进「设置」手填地址」），却在这屏上够不着。
+        // 主页、收藏这些不需要服务端的入口也一并断了。
+        //
+        // 底栏放最后（和其余各屏一致），它是最外层的常驻导航。
+        // 上面那个加载区不会和它打架：`loading` 为真时屏幕都是历史/搜索/
+        // 目录/阅读器，出错页上它恒为 false。
+        NavBar {
+            y: 1648px - 108px;
+            active: root.nav-active;
+            picked(i) => { root.nav-picked(i); }
+        }
+    }
+
+    // ================================================================
+    // 数字小键盘覆盖层（规格 4.6）
+    //
+    // **盖在当前屏上**，不跳屏、不重排（规则 ⑨）。一处实现伺候三个用途：
+    // 全屏刷新间隔 / 跳转到页 / 按本子 ID 打开 —— 都是纯数字输入。
+    //
+    // 面板贴底 920px，上方留 728px 露出原来那一屏 ——
+    // 用户能看见自己在哪个设置行上操作，不会「跳到一个陌生的界面」。
+    //
+    // 为什么不做成半透明遮罩：墨水屏只有 16 档灰，没有 alpha 混合，
+    // 「半透明」只会变成一片新的浅灰，反而糊住底下的内容。
+    // ================================================================
+    if root.keypad-shown : Rectangle {
+        x: 0;
+        y: 0;
+        width: Tok.screen-w;
+        height: Tok.screen-h;
+        background: transparent;
+
+        Rectangle {
+            x: 0;
+            y: 1648px - 920px;
+            width: Tok.screen-w;
+            height: 920px;
+            background: Tok.paper;
+
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: Tok.border;
+                background: Tok.ink;
+            }
+
+            // 标题行：左边说明在输什么，右边「取消」
+            Text {
+                x: 50px;
+                y: 0;
+                width: parent.width - 50px - 240px;
+                height: 90px;
+                text: root.keypad-title;
+                color: Tok.ink;
+                font-size: 34px;
+                font-weight: 700;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Rectangle {
+                width: 200px;
+                height: 62px;
+                x: parent.width - 50px - self.width;
+                y: (90px - self.height) / 2;
+                background: Tok.paper;
+                border-width: Tok.border;
+                border-color: Tok.ink;
+
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "取消";
+                    color: Tok.ink;
+                    font-size: 30px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchArea {
+                    clicked => { root.keypad-cancel(); }
+                }
+            }
+
+            // 输入框：显示已输的数字 + 常亮光标
+            Rectangle {
+                x: 50px;
+                y: 90px;
+                width: Tok.screen-w - 100px;
+                height: 130px;
+                background: Tok.paper;
+                border-width: Tok.border;
+                border-color: Tok.ink;
+
+                Text {
+                    x: 30px;
+                    width: parent.width - 60px - 420px;
+                    height: parent.height;
+                    text: root.keypad-value == "" ? "　" : root.keypad-value;
+                    color: Tok.ink;
+                    font-size: 56px;
+                    letter-spacing: 6px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Rectangle {
+                    x: 30px + root.keypad-len * 40px;
+                    y: (parent.height - 56px) / 2;
+                    width: 3px;
+                    height: 56px;
+                    background: Tok.ink;
+                }
+                Text {
+                    width: 400px;
+                    height: parent.height;
+                    x: parent.width - 30px - self.width;
+                    text: root.keypad-note;
+                    color: Tok.g5;
+                    font-size: 27px;
+                    horizontal-alignment: TextHorizontalAlignment.right;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            // 数字键：3 列 × 4 行
+            //   每格宽 (1236 − 50×2 − 12×2) / 3 = 370.67 → 取 370
+            //   行高 140
+            // ⚠️ Slint 里没有 `%` 运算符 —— 取模要用 Math.mod。
+            //    写成 `i % 3` 会解析成「单位」，报错信息还指向别处，容易看歪。
+            for i in 9 : NumKey {
+                x: 50px + Math.mod(i, 3) * 382px;
+                y: 240px + Math.floor(i / 3) * 152px;
+                width: 370px;
+                height: 140px;
+                label: "\{(i + 1)}";
+                hit => { root.keypad-digit("\{(i + 1)}"); }
+            }
+            // 末行：清除 / 0 / 删除
+            NumKey {
+                x: 50px;
+                y: 240px + 3 * 152px;
+                width: 370px;
+                height: 140px;
+                label: "清除";
+                fn-key: true;
+                hit => { root.keypad-clear(); }
+            }
+            NumKey {
+                x: 50px + 382px;
+                y: 240px + 3 * 152px;
+                width: 370px;
+                height: 140px;
+                label: "0";
+                hit => { root.keypad-digit("0"); }
+            }
+            NumKey {
+                x: 50px + 764px;
+                y: 240px + 3 * 152px;
+                width: 370px;
+                height: 140px;
+                label: "删除";
+                fn-key: true;
+                hit => { root.keypad-backspace(); }
+            }
+
+            // 「确定」——整块黑，主动作（规格 5：每屏至多一个主要动作）
+            Rectangle {
+                x: 50px;
+                y: 240px + 4 * 152px;
+                width: Tok.screen-w - 100px;
+                height: 130px;
+                background: Tok.ink;
+
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "确定";
+                    color: Tok.paper;
+                    font-size: 46px;
+                    letter-spacing: 6px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchArea {
+                    clicked => { root.keypad-ok(); }
+                }
+            }
+        }
+    }
+
+    // ================================================================
+    // 屏保 —— 放在**最后**声明：Slint 里后面的元素盖在前面的上面，
+    // 所以这一层盖住所有界面。挂起前铺上，醒来撤掉。
+    //
+    // 特意**不加 TouchArea**：屏保期间的电源键由 src/power.rs 直接从 evdev
+    // 读走，不走触摸链路；这里加触摸区反而可能在醒来那一瞬间吞掉点一下。
+    // ================================================================
+    if root.screensaver-shown : Image {
+        x: 0;
+        y: 0;
+        width: Tok.screen-w;
+        height: Tok.screen-h;
+        source: root.screensaver-image;
+        image-fit: fill;
+    }
+}

@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>「退出」图标 · 候选稿（Kindle 电子墨水）</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;transition:none !important;animation:none !important;}
+body{background:#2e2e2e;padding:34px;color:#ddd;
+  font-family:"WenQuanYi Micro Hei","Noto Sans CJK SC","Microsoft YaHei","PingFang SC",sans-serif;}
+
+h1{color:#fff;font-size:20px;margin-bottom:8px;}
+p.sub{font-size:13.5px;line-height:1.8;color:#b0b0b0;max-width:1000px;margin-bottom:10px;}
+p.sub b{color:#fff;}
+
+.rules{display:flex;gap:9px;flex-wrap:wrap;margin:22px 0 30px;}
+.rules div{border:1px solid #6d6d6d;padding:8px 12px;font-size:12px;color:#c8c8c8;max-width:250px;line-height:1.55;}
+.rules b{color:#fff;display:block;margin-bottom:2px;}
+
+.grid{display:flex;gap:26px;flex-wrap:wrap;align-items:flex-start;}
+
+.card{border:1px solid #6d6d6d;background:#1f1f1f;padding:18px 20px 20px;width:290px;}
+.card h2{color:#fff;font-size:15px;margin-bottom:4px;}
+.card h2 em{font-style:normal;color:#8d8d8d;font-size:12px;font-weight:400;margin-left:7px;}
+.card .desc{font-size:12.5px;color:#a8a8a8;line-height:1.65;margin-bottom:16px;min-height:52px;}
+
+.shots{display:flex;gap:12px;margin-bottom:14px;}
+.shot{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;}
+.shot .lbl{font-size:10.5px;color:#8d8d8d;}
+.box{width:100%;display:flex;align-items:center;justify-content:center;
+  border:1px solid #565656;background:#fff;color:#000;padding:12px 0;}
+.box.rev{background:#000;color:#fff;}
+
+svg.i{display:block;fill:none;stroke:currentColor;stroke-linecap:square;stroke-linejoin:round;}
+
+.pick{margin-top:14px;border-top:1px solid #4a4a4a;padding-top:12px;}
+.pick code{display:block;font-family:Consolas,monospace;font-size:11px;color:#9fd39f;
+  line-height:1.5;white-space:pre-wrap;word-break:break-all;}
+
+/* 菜单行实景 */
+.rowsec{margin-top:42px;}
+.rowsec h2{color:#fff;font-size:16px;margin-bottom:6px;}
+.rowsec p{font-size:12.5px;color:#a8a8a8;line-height:1.7;margin-bottom:16px;max-width:820px;}
+.rowsec p b{color:#eee;}
+
+.slot{width:618px;height:300px;position:relative;overflow:hidden;background:#fff;
+  box-shadow:0 0 0 2px #000,0 10px 26px rgba(0,0,0,.5);}
+.screen{position:absolute;top:0;left:0;width:1236px;height:600px;transform:scale(0.5);
+  transform-origin:0 0;background:#fff;color:#000;font-size:34px;line-height:1.25;}
+
+.mrow{height:122px;padding:0 50px;border-bottom:2px solid #888;display:flex;
+  align-items:center;justify-content:space-between;font-size:40px;}
+.mrow:last-child{border-bottom:none;}
+.mv{font-size:30px;color:#555;display:flex;align-items:center;gap:16px;}
+.mv b{color:#000;font-weight:400;}
+
+.ic-m{width:46px;height:46px;stroke-width:9;}
+</style>
+</head>
+<body>
+
+<!-- ============ 图标定义 ============ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <!-- A 门 + 右箭头（经典退出） -->
+  <symbol id="i-exit-a" viewBox="0 0 100 100">
+    <path d="M56 14 H14 V86 H56"/>
+    <path d="M40 50 H82"/>
+    <path d="M64 28 L86 50 L64 72"/>
+  </symbol>
+
+  <!-- B 门 + 左箭头（退出到上一层） -->
+  <symbol id="i-exit-b" viewBox="0 0 100 100">
+    <path d="M44 14 H86 V86 H44"/>
+    <path d="M60 50 H18"/>
+    <path d="M36 28 L14 50 L36 72"/>
+  </symbol>
+
+  <!-- C 电源（退出程序） -->
+  <symbol id="i-exit-c" viewBox="0 0 100 100">
+    <path d="M34 26 A32 32 0 1 0 66 26"/>
+    <path d="M50 10 V48"/>
+  </symbol>
+
+  <!-- D 竖墙 + 右箭头（最简） -->
+  <symbol id="i-exit-d" viewBox="0 0 100 100">
+    <path d="M24 14 V86"/>
+    <path d="M42 50 H78"/>
+    <path d="M60 30 L80 50 L60 70"/>
+  </symbol>
+</svg>
+
+<h1>「退出」图标 · 四个候选（1:1 真机尺寸）</h1>
+<p class="sub">
+下面每个图标都按<b>真机实际大小</b>渲染：底栏 66px、菜单行 46px。
+白底那格是普通状态，黑底那格是<b>反白（选中）状态</b>——两种都要能看清。
+</p>
+
+<div class="rules">
+  <div><b>viewBox 0 0 100 100</b>和其他图标统一，好管理</div>
+  <div><b>描边 7 / 9</b>66px 用 7（实机 4.6px），46px 用 9（实机 4.1px）</div>
+  <div><b>只有线条，没有填充</b>除了箭头的实心三角是单独一个 fill</div>
+  <div><b>不用字符</b>不是「⏻」也不是「→」，字体缺字会掉成空白</div>
+</div>
+
+<div class="grid">
+
+  <!-- A -->
+  <div class="card">
+    <h2>甲 · 门 + 右箭头<em>推荐</em></h2>
+    <div class="desc">最通用的「退出」符号。一扇右边敞开的门，箭头从门里穿出去。认识度最高，不用教。</div>
+    <div class="shots">
+      <div class="shot">
+        <div class="box"><svg class="i" viewBox="0 0 100 100" style="width:66px;height:66px;stroke-width:7"><use href="#i-exit-a"/></svg></div>
+        <span class="lbl">66px 白底</span>
+      </div>
+      <div class="shot">
+        <div class="box rev"><svg class="i" viewBox="0 0 100 100" style="width:66px;height:66px;stroke-width:7"><use href="#i-exit-a"/></svg></div>
+        <span class="lbl">66px 反白</span>
+      </div>
+      <div class="shot">
+        <div class="box"><svg class="i" viewBox="0 0 100 100" style="width:46px;height:46px;stroke-width:9"><use href="#i-exit-a"/></svg></div>
+        <span class="lbl">46px 白底</span>
+      </div>
+    </div>
+    <div class="pick"><code>&lt;path d="M56 14 H14 V86 H56"/&gt;
+&lt;path d="M40 50 H82"/&gt;
+&lt;path d="M64 28 L86 50 L64 72"/&gt;</code></div>
+  </div>
+
+  <!-- B -->
+  <div class="card">
+    <h2>乙 · 门 + 左箭头<em>备选</em></h2>
+    <div class="desc">甲的水平镜像。箭头往左穿出，读作「回到上一层」。如果这个按钮是<b>返回书架</b>而不是关程序，这个更贴切。</div>
+    <div class="shots">
+      <div class="shot">
+        <div class="box"><svg class="i" viewBox="0 0 100 100" style="width:66px;height:66px;stroke-width:7"><use href="#i-exit-b"/></svg></div>
+        <span class="lbl">66px 白底</span>
+      </div>
+      <div class="shot">
+        <div class="box rev"><svg class="i" viewBox="0 0 100 100" style="width:66px;height:66px;stroke-width:7"><use href="#i-exit-b"/></svg></div>
+        <span class="lbl">66px 反白</span>
+      </div>
+      <div class="shot">
+        <div class="box"><svg class="i" viewBox="0 0 100 100" style="width:46px;height:46px;stroke-width:9"><use href="#i-exit-b"/></svg></div>
+        <span class="lbl">46px 白底</span>
+      </div>
+    </div>
+    <div class="pick"><code>&lt;path d="M44 14 H86 V86 H44"/&gt;
+&lt;path d="M60 50 H18"/&gt;
+&lt;path d="M36 28 L14 50 L36 72"/&gt;</code></div>
+  </div>
+
+  <!-- C -->
+  <div class="card">
+    <h2>丙 · 电源符号<em>关程序专用</em></h2>
+    <div class="desc">这个不是「退出」而是「<b>关掉程序</b>」。如果最终决定加一行「退出程序」，用这个和「退出阅读」区分开，不会看错。</div>
+    <div class="shots">
+      <div class="shot">
+        <div class="box"><svg class="i" viewBox="0 0 100 100" style="width:66px;height:66px;stroke-width:7"><use href="#i-exit-c"/></svg></div>
+        <span class="lbl">66px 白底</span>
+      </div>
+      <div class="shot">
+        <div class="box rev"><svg class="i" viewBox="0 0 100 100" style="width:66px;height:66px;stroke-width:7"><use href="#i-exit-c"/></svg></div>
+        <span class="lbl">66px 反白</span>
+      </div>
+      <div class="shot">
+        <div class="box"><svg class="i" viewBox="0 0 100 100" style="width:46px;height:46px;stroke-width:9"><use href="#i-exit-c"/></svg></div>
+        <span class="lbl">46px 白底</span>
+      </div>
+    </div>
+    <div class="pick"><code>&lt;path d="M34 26 A32 32 0 1 0 66 26"/&gt;
+&lt;path d="M50 10 V48"/&gt;</code></div>
+  </div>
+
+  <!-- D -->
+  <div class="card">
+    <h2>丁 · 竖墙 + 右箭头<em>最简</em></h2>
+    <div class="desc">只有三笔，小尺寸下最不容易糊。代价是<b>辨识度差一点</b>——单独看可能被当成「发送」或「下一首」。</div>
+    <div class="shots">
+      <div class="shot">
+        <div class="box"><svg class="i" viewBox="0 0 100 100" style="width:66px;height:66px;stroke-width:7"><use href="#i-exit-d"/></svg></div>
+        <span class="lbl">66px 白底</span>
+      </div>
+      <div class="shot">
+        <div class="box rev"><svg class="i" viewBox="0 0 100 100" style="width:66px;height:66px;stroke-width:7"><use href="#i-exit-d"/></svg></div>
+        <span class="lbl">66px 反白</span>
+      </div>
+      <div class="shot">
+        <div class="box"><svg class="i" viewBox="0 0 100 100" style="width:46px;height:46px;stroke-width:9"><use href="#i-exit-d"/></svg></div>
+        <span class="lbl">46px 白底</span>
+      </div>
+    </div>
+    <div class="pick"><code>&lt;path d="M24 14 V86"/&gt;
+&lt;path d="M42 50 H78"/&gt;
+&lt;path d="M60 30 L80 50 L60 70"/&gt;</code></div>
+  </div>
+
+</div>
+
+<!-- ============ 菜单行实景 ============ -->
+<div class="rowsec">
+  <h2>放进阅读菜单里长这样（用甲的 46px）</h2>
+  <p>
+    这是真机尺寸的菜单底部几行（整屏 1236 宽，这里缩到 50%）。<br>
+    注意<b>「退出阅读」这行我没有硬塞图标</b>——菜单左边是文字，右边是当前值，本来就不放图标。
+    图标是给<b>底栏</b>和<b>按钮</b>用的。所以真正要用到这个图标的位置是：
+    ① 如果做了独立的「退出」按钮　② 底栏或工具条上加了退出项。
+  </p>
+
+  <div class="slot"><div class="screen">
+    <div class="mrow"><span>全屏刷新</span><span class="mv">每 5 页</span></div>
+    <div class="mrow"><span>收藏本话</span><span class="mv">未收藏　<svg class="i ic-m" viewBox="0 0 100 100"><path d="M50 14 L60 38 L84 41 L66 57 L71 81 L50 69 L29 81 L34 57 L16 41 L40 38 Z"/></svg></span></div>
+    <div class="mrow"><span>退出阅读</span><span class="mv">返回书架</span></div>
+  </div></div>
+</div>
+
+</body>
+</html>

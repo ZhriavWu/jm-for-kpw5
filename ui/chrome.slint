@@ -1,0 +1,605 @@
+// 全局骨架 —— 对应 design/UI-SPEC.md 第 3 节。
+//
+// 上下堆叠顺序（规格 3.5）：
+//
+//     [ 状态条 88  or  内页顶栏 128 ]
+//     [ 内容区 flex:1               ]
+//     [ 翻页条 140 ]   ← 管「这一屏的内容」
+//     [ 底栏   108 ]   ← 管「整个 App」，位置永不改变
+//
+// 阅读器没有底栏，全屏到底。
+
+import { Tok } from "tokens.slint";
+import { IcoHistory, IcoSearch, IcoHome, IcoStar, IcoSettings } from "icons.slint";
+
+/// 白底黑框按钮。不可用时整体变 #999（边框 + 文字一起）。
+///
+/// ⚠️ 禁用态是全稿**唯一**的灰化表达（规格 2.1）——
+/// 别在别处用灰色表示「不可点」。
+export component BtnBox inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> usable: true;
+    callback clicked();
+
+    background: Tok.paper;
+    border-width: Tok.border;
+    border-color: root.usable ? Tok.ink : Tok.g9;
+
+    Text {
+        text: root.label;
+        color: root.usable ? Tok.ink : Tok.g9;
+        font-size: 34px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: parent.width;
+        height: parent.height;
+        overflow: elide;
+    }
+
+    TouchArea {
+        enabled: root.usable;
+        clicked => { root.clicked(); }
+    }
+}
+
+/// 黑条上的小按钮（状态条右边那个「重新连接」）。
+/// 宽度固定，因为 Slint 里没有「按文字量算宽度」的办法。
+export component BtnOutline inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> on-dark: false;
+    callback clicked();
+
+    width: 220px;
+    height: 58px;
+    background: root.on-dark ? Tok.ink : Tok.paper;
+    border-width: 2px;
+    border-color: root.on-dark ? Tok.paper : Tok.ink;
+
+    Text {
+        text: root.label;
+        color: root.on-dark ? Tok.paper : Tok.ink;
+        font-size: 28px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: parent.width;
+        height: parent.height;
+        overflow: elide;
+    }
+
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+/// 底栏：五项等宽，纯图标，选中态整格反白。
+///
+/// 顺序**固定不可调**：历史 / 搜索 / 主页 / 收藏 / 设置。
+/// 纯图标不带文字标签是刻意的（规格 3.1）—— 省高度，
+/// 而且「整格反白」本身就是很清楚的选中信号。
+export component NavBar inherits Rectangle {
+    /// 当前高亮第几格。−1 = 都不亮（详情页这类子页面）。
+    in property <int> active: -1;
+    callback picked(int);
+
+    width: Tok.screen-w;
+    height: Tok.nav-h;
+    background: Tok.paper;
+
+    // 上边 3px 实线 —— 底栏和上面内容之间的分界线。
+    //
+    // ⚠️ **这条线必须比那 5 个格子先声明，格子也必须让开这 3px。**
+    //
+    //    踩过的坑：格子原来是 `y: 0; height: 整条高度`（整格铺满），
+    //    又声明在线的**后面** —— 等于用白底把线整个刷掉了。
+    //    现象就是「底下那 5 个板块上面没有那一横，跟上面的内容没有分界线」。
+    //    实测：线本该在物理 y 770/771 横贯 618px，实际那两行只有 122 个
+    //    暗像素（全是图标），一个像素的线都没剩下。
+    //
+    //    改法：格子整体下移 3px（`y: Tok.border`），线就露出来了。
+    //
+    // ⚠️ 线画在底栏**内部**（y=0 就是底栏顶边），**不往上侵**。
+    //    搜索页键盘竖起时，键盘的下边正好落在底栏的顶边上，往上画就会压进
+    //    键盘那一块（键盘底部本来留了 9px 空白），看着像键盘自己的边而不是
+    //    底栏的分界线。
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: Tok.border;
+        background: Tok.ink;
+    }
+
+    for i in 5 : Rectangle {
+        x: i * (root.width / 5);
+        // ⚠️ 让开顶上那 3px 分界线 —— 写成 `y: 0` 会把它盖掉
+        y: Tok.border;
+        width: root.width / 5;
+        height: root.height - Tok.border;
+        background: i == root.active ? Tok.ink : Tok.paper;
+
+        // 格间 2px 竖线，首格不画
+        if i > 0 : Rectangle {
+            x: 0;
+            y: 0;
+            width: Tok.hairline;
+            height: parent.height;
+            background: Tok.g8;
+        }
+
+        // ⚠️ 选中那格是**黑底白图标**，所以 `bg` 必须跟着一起翻 ——
+        // 空心图标是靠"把内部涂成背景色"实现的，bg 传错的话
+        // 内部会涂成白色，图标在黑格上变成一坨白眼。
+        if i == 0 : IcoHistory {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            tint: i == root.active ? Tok.paper : Tok.ink;
+            bg: i == root.active ? Tok.ink : Tok.paper;
+        }
+        if i == 1 : IcoSearch {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            tint: i == root.active ? Tok.paper : Tok.ink;
+            bg: i == root.active ? Tok.ink : Tok.paper;
+        }
+        if i == 2 : IcoHome {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            tint: i == root.active ? Tok.paper : Tok.ink;
+            bg: i == root.active ? Tok.ink : Tok.paper;
+        }
+        if i == 3 : IcoStar {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            tint: i == root.active ? Tok.paper : Tok.ink;
+            bg: i == root.active ? Tok.ink : Tok.paper;
+        }
+        if i == 4 : IcoSettings {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            tint: i == root.active ? Tok.paper : Tok.ink;
+            bg: i == root.active ? Tok.ink : Tok.paper;
+        }
+
+        TouchArea {
+            clicked => { root.picked(i); }
+        }
+    }
+}
+
+/// 顶部反白状态条：左「服务器　状态　IP:端口」，右「重新连接」。
+///
+/// 服务器状态**必须常驻可见**，「重新连接」**不要藏进设置** ——
+/// 新手最常见的失败就是忘了在电脑上开服务端，这条黑条是唯一的提示。
+export component StatusBar inherits Rectangle {
+    in property <string> text: "服务器　未连接";
+    in property <string> action: "重新连接";
+    callback retry();
+
+    width: Tok.screen-w;
+    height: Tok.status-h;
+    background: Tok.ink;
+
+    Text {
+        x: 40px;
+        width: parent.width - 300px;
+        height: parent.height;
+        text: root.text;
+        color: Tok.paper;
+        font-size: 30px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    BtnOutline {
+        x: parent.width - 40px - self.width;
+        y: (parent.height - self.height) / 2;
+        label: root.action;
+        on-dark: true;
+        clicked => { root.retry(); }
+    }
+}
+
+/// 内页顶栏：左返回 / 中标题 / 右说明。
+export component AppBar inherits Rectangle {
+    in property <string> title: "";
+    in property <string> right: "";
+    in property <string> back-label: "返回";
+    callback back();
+
+    width: Tok.screen-w;
+    height: Tok.appbar-h;
+
+    Rectangle {
+        x: 0;
+        y: parent.height - Tok.border;
+        width: parent.width;
+        height: Tok.border;
+        background: Tok.ink;
+    }
+
+    BtnBox {
+        x: 40px;
+        y: (parent.height - self.height) / 2;
+        width: 200px;
+        height: 88px;
+        label: root.back-label;
+        clicked => { root.back(); }
+    }
+
+    Text {
+        x: 270px;
+        width: parent.width - 540px;
+        height: parent.height;
+        text: root.title;
+        color: Tok.ink;
+        font-size: 40px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Text {
+        width: 240px;
+        height: parent.height;
+        x: parent.width - 40px - self.width;
+        text: root.right;
+        color: Tok.g5;
+        font-size: 30px;
+        horizontal-alignment: TextHorizontalAlignment.right;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+/// 翻页条：左「上一页」/ 中页码 / 右「下一页」。
+///
+/// 文字固定写「上一页」「下一页」，**不用箭头符号**（符号会缺字掉成空白）。
+/// 禁用态是全稿唯一的灰化表达 —— 边框和文字一起变 #999。
+export component PagerBar inherits Rectangle {
+    in property <string> info: "";
+    in property <bool> has-prev: false;
+    in property <bool> has-next: false;
+    callback prev();
+    callback next();
+
+    width: Tok.screen-w;
+    height: Tok.pager-h;
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: Tok.border;
+        background: Tok.ink;
+    }
+
+    BtnBox {
+        x: 24px;
+        y: (parent.height - self.height) / 2;
+        width: 320px;
+        height: 104px;
+        label: "上一页";
+        usable: root.has-prev;
+        clicked => { root.prev(); }
+    }
+
+    Text {
+        x: 368px;
+        width: parent.width - 736px;
+        height: parent.height;
+        text: root.info;
+        color: Tok.g5;
+        font-size: 32px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    BtnBox {
+        width: 320px;
+        height: 104px;
+        x: parent.width - 24px - self.width;
+        y: (parent.height - self.height) / 2;
+        label: "下一页";
+        usable: root.has-next;
+        clicked => { root.next(); }
+    }
+}
+
+/// 搜索页三列网格里的一格：大封面 + 标题两行 + 本子 ID + 星标。
+///
+/// 尺寸（和 app.slint 里的排布一起看）：
+///   整屏 1236 → 左右边距 30、格间 24 → 每格 **376**
+///   内容区 1128 → 两行，每行 **564**（6 条正好铺满，和 SEARCH_PER_PAGE 一致）
+///   封面框最大 **340×340**（jmcomic 的封面本身是正方形）
+///
+/// ⚠️ 触摸区必须**互不重叠**（README 第 11 条）：主区两块 + 星标一块，
+///    三块正好拼满整格。重叠的两个 TouchArea 谁拿到事件不可靠 ——
+///    列表行当年就是那么报「星星点不动」的。
+export component CoverCell inherits Rectangle {
+    in property <string> label: "";
+    in property <string> meta: "";
+    in property <image> thumb;
+    /// 封面框的尺寸，由 Rust 按图片实际比例算好（见 render::fit_box）。
+    in property <int> cover-w: 340;
+    in property <int> cover-h: 340;
+    /// 右侧星标：0 = 不显示，1 = 空心，2 = 实心
+    in property <int> star: 0;
+    callback activated();
+    callback star-hit();
+
+    background: Tok.paper;
+
+    // 星标那一块：贴右下角，100×100 的手指热区（规格 6：可点区 ≥100px）
+    private property <length> star-zone: 100px;
+
+    // ---- 封面框 ----
+    // 水平居中、顶部留 24；非正方形封面按 contain 放进方框里，不拉伸。
+    Rectangle {
+        x: (root.width - self.width) / 2;
+        y: 24px;
+        width: root.cover-w * 1px;
+        height: root.cover-h * 1px;
+        border-width: 2px;
+        border-color: Tok.g8;
+        background: Tok.paper;
+
+        if root.thumb.width > 0 : Image {
+            x: 2px;
+            y: 2px;
+            width: parent.width - 4px;
+            height: parent.height - 4px;
+            source: root.thumb;
+            image-fit: contain;
+        }
+    }
+
+    // ---- 标题（最多两行，超出省略）----
+    Text {
+        x: 10px;
+        y: 376px;
+        width: root.width - 20px;
+        height: 88px;
+        text: root.label;
+        color: Tok.ink;
+        font-size: 32px;
+        wrap: TextWrap.word-wrap;
+        overflow: elide;
+        vertical-alignment: TextVerticalAlignment.top;
+    }
+
+    // ---- 本子 ID ----
+    Text {
+        x: 10px;
+        y: 466px;
+        // 右边给星标让出 90px，免得 ID 从星星底下穿过去
+        width: root.width - root.star-zone - 10px;
+        height: 38px;
+        text: root.meta;
+        color: Tok.g5;
+        font-size: 26px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    // ---- 星标（只有搜索结果用得上）----
+    if root.star > 0 : Rectangle {
+        x: root.width - root.star-zone;
+        y: root.height - root.star-zone;
+        width: root.star-zone;
+        height: root.star-zone;
+        background: transparent;
+
+        // ⚠️ 同 ListLine：**不要传 `stroke-w`**，由 IcoStar 按 icon-size 等比推导。
+        IcoStar {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            icon-size: 42px;
+            solid: root.star == 2;
+            tint: Tok.ink;
+            bg: Tok.paper;
+        }
+        TouchArea {
+            clicked => { root.star-hit(); }
+        }
+    }
+
+    // ---- 主触摸区（两块，避开右下角星标那块）----
+    TouchArea {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.star > 0 ? root.height - root.star-zone : root.height;
+        clicked => { root.activated(); }
+    }
+    if root.star > 0 : TouchArea {
+        x: 0;
+        y: root.height - root.star-zone;
+        width: root.width - root.star-zone;
+        height: root.star-zone;
+        clicked => { root.activated(); }
+    }
+}
+
+/// 全站通用的一行列表项（规格 4.1）：
+/// [缩略图 72×96] gap 26 [标题 flex:1] [右侧元信息] [可选：星标]
+export component ListLine inherits Rectangle {
+    in property <string> label: "";
+    in property <string> meta: "";
+    /// 标题**下面**那行小字。空串 = 不画，这时标题照旧单行垂直居中，
+    /// **其余各屏的外观一个像素都不变**（它们都不传这个属性）。
+    ///
+    /// 目前只有收藏页的单话用：上面是本子标题，下面标「第 N 话」。
+    in property <string> sub-label: "";
+    in property <image> thumb;
+    /// 右侧星标：0 = 不显示，1 = 空心，2 = 实心
+    in property <int> star: 0;
+    /// 要不要画左边那个缩略图框。
+    /// 章节目录**没有封面**，关掉它 —— 否则每行左边挂一个空框，
+    /// 看起来像图没加载出来。关掉之后标题也顺势左移，不浪费那 98px。
+    in property <bool> show-thumb: true;
+    callback activated();
+    callback star-hit();
+
+    width: Tok.screen-w;
+    background: Tok.paper;
+
+    // ---- 右侧三块的位置，**先算出来再用** ----
+    //
+    // ⚠️ 这里踩过一个坑：标题宽度原来写成「有元信息留 300、没有就留 110」，
+    //    而星标的实际位置是 `父宽 − 306` —— 两个数对不上。
+    //    章节行（没有元信息、有星标）于是把标题一路画到 x=430，
+    //    而星标在 234~280，**文字和星星叠在一起**。
+    //
+    //    现在统一由下面三个属性推导，标题宽度跟着星标/元信息的实际位置走，
+    //    不可能再对不上。
+    /// 星标的左边界（贴着右边距）
+    /// ⚠️ 必用 `root.width` —— **组件根上访问不到 `parent`**（会编译报错），
+    /// 而 `root.width` 是调用方设的那个值（章节行是 540，列表行是 1236）。
+    private property <length> star-x: root.width - 60px - 46px;
+    /// 星标热区的左边界：比星标本体宽一圈，手指好按（规格 6：可点区 ≥100px）
+    private property <length> star-hit-x: root.width - 60px - 46px - 27px;
+    /// 元信息的左边界。有星标时往左让 66（星标 + 间距）
+    private property <length> meta-x: root.width - 60px - (root.star > 0 ? 66px : 0px) - 180px;
+    /// 给右边三块预留的总宽度（含右边距），标题宽度 = 总宽 − 起点 − 这个值
+    private property <length> right-reserve:
+        60px
+        + (root.star > 0 ? 66px : 0px)
+        + (root.meta == "" ? 0px : 200px);
+
+    /// 标题区左边界。有缩略图就排在它右边，没有就贴左边距。
+    private property <length> label-x: root.show-thumb ? (60px + 72px + 26px) : 60px;
+    /// 标题区宽度。和右边那三块同一套推导（`right-reserve`），不会对不上。
+    private property <length> label-w: root.width - root.label-x - root.right-reserve;
+
+    // 行间分隔线（2px #888，末行由调用方决定不画）
+    Rectangle {
+        x: 0;
+        y: parent.height - Tok.hairline;
+        width: parent.width;
+        height: Tok.hairline;
+        background: Tok.g8;
+    }
+
+    // ⚠️ **整行的触摸区必须让开星标那一条。**
+    //
+    // 原来它是铺满整行的，而星标的热区叠在上面 —— 用户报「目录旁边的收藏
+    // 点不动」。试过「把行触摸区挪到前面声明、靠 z 序压住星标」，**没用**：
+    // 重叠的两个 TouchArea 谁拿到事件在这套实现里不可靠。
+    //
+    // 所以改成**两块拼起来、互不重叠**：行触摸区到星标热区左边为止，
+    // 星标热区接着铺到行尾。没有重叠就没有歧义。
+    TouchArea {
+        x: 0;
+        width: root.star > 0 ? root.star-hit-x : root.width;
+        height: parent.height;
+        clicked => { root.activated(); }
+    }
+
+    // 缩略图框。尺寸固定 72×96，里面的封面按 contain 缩放 ——
+    // jmcomic 的封面本身是正方形（我们量过 59 张全是方的），
+    // 所以竖框里方图会上下留白，这是刻意的：框统一，列表才对齐。
+    if root.show-thumb : Rectangle {
+        x: 60px;
+        y: (parent.height - self.height) / 2;
+        width: 72px;
+        height: 96px;
+        border-width: 2px;
+        border-color: Tok.g8;
+        background: Tok.paper;
+
+        if root.thumb.width > 0 : Image {
+            x: 1px;
+            y: 1px;
+            width: parent.width - 2px;
+            height: parent.height - 2px;
+            source: root.thumb;
+            image-fit: contain;
+        }
+    }
+
+    // 标题。**单行是常态**（sub-label 为空），整个标题区垂直居中。
+    if root.sub-label == "" : Text {
+        x: root.label-x;
+        width: root.label-w;
+        height: parent.height;
+        text: root.label;
+        color: Tok.ink;
+        font-size: 36px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    // 两行（收藏页的单话）：用 `VerticalLayout` 居中。
+    //
+    // ⚠️ **不要手写「各占一半行高 + `vertical-alignment: bottom/top`」** ——
+    //    实测那样写两行会**叠在同一条线上**，只剩一行看得见。
+    //    （量出来的证据：行内相对位置只有一条 68..100 的文字带，
+    //      而正确的话该是 26..71 和 71..116 两条。）
+    //    交给布局容器算，省得跟 Slint 的对齐语义较劲。
+    if root.sub-label != "" : VerticalLayout {
+        x: root.label-x;
+        y: 0;
+        width: root.label-w;
+        height: parent.height;
+        alignment: center;
+        spacing: 4px;
+
+        Text {
+            text: root.label;
+            color: Tok.ink;
+            font-size: 36px;
+            overflow: elide;
+        }
+        // 第二行：收藏页单话的「第 N 话」。用次级灰，和上面那行拉开层次。
+        Text {
+            text: root.sub-label;
+            color: Tok.g5;
+            font-size: 28px;
+            overflow: elide;
+        }
+    }
+
+    if root.meta != "" : Text {
+        x: root.meta-x;
+        width: 180px;
+        height: parent.height;
+        text: root.meta;
+        color: Tok.g5;
+        font-size: 28px;
+        horizontal-alignment: TextHorizontalAlignment.right;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    // 星标（只有收藏页 / 目录用得上，默认不占位）
+    if root.star > 0 : Rectangle {
+        x: root.star-x;
+        y: (parent.height - self.height) / 2;
+        width: 46px;
+        height: 46px;
+        background: transparent;
+
+        // ⚠️ **不要在这里传 `stroke-w`。** 描边宽度必须由 `icon-size` 等比推导
+        //    （`IcoStar` 内部自己算）。这里原来写死 `stroke-w: 9px`，
+        //    在 42px 的星上比例是底栏那颗的两倍粗，把凹角糊死 ——
+        //    表现就是「空心的星看着是实心」。详见 icons.slint 里 `IcoStar` 的注释。
+        IcoStar {
+            icon-size: 42px;
+            solid: root.star == 2;
+            tint: Tok.ink;
+            bg: Tok.paper;
+        }
+    }
+
+    // 星标的热区：**宽度 100px**（规格 6 要求可点区 ≥100px）——
+    // 46px 的星直接点太考手指了。它接着行触摸区的右边铺到行尾，
+    // 两块拼起来正好覆盖整行、不重叠。
+    if root.star > 0 : TouchArea {
+        x: root.star-hit-x;
+        width: root.width - root.star-hit-x;
+        height: parent.height;
+        clicked => { root.star-hit(); }
+    }
+}

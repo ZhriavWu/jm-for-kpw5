@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "name": "Start JMcomic",
+      "priority": 1,
+      "action": "./launch.sh",
+      "exitmenu": true
+    },
+    {
+      "name": "Show recent log",
+      "priority": 2,
+      "action": "./show-log.sh",
+      "exitmenu": false
+    },
+    {
+      "name": "Self-test (writes to USB)",
+      "priority": 3,
+      "action": "./selftest.sh",
+      "exitmenu": false
+    }
+  ]
+}

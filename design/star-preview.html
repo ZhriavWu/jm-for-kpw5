@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>收藏星标 · 两套</title>
+<style>
+  body{margin:0;padding:40px;background:#3b3b3b;color:#eee;
+       font-family:"Microsoft YaHei","PingFang SC",sans-serif;}
+
+  .big{display:flex;gap:80px;align-items:flex-start;margin-bottom:52px;}
+
+  .box{background:#fff;padding:30px 40px;display:flex;flex-direction:column;
+       align-items:center;gap:14px;}
+  .box .t{font-size:14px;color:#000;font-weight:700;}
+  .box .u{font-size:11px;color:#888;font-family:Consolas,monospace;}
+
+  /* 真机原大，PW5 上就是这么大 */
+  .s66{width:66px;height:66px;}
+  .s46{width:46px;height:46px;}
+  .s42{width:42px;height:42px;}
+
+  h2{font-size:14px;color:#aaa;font-weight:400;margin:34px 0 12px;letter-spacing:1px;}
+  .row{display:flex;gap:34px;align-items:flex-end;}
+  .nav{display:flex;border:2px solid #000;background:#fff;}
+  .nc{width:86px;height:86px;display:flex;align-items:center;justify-content:center;}
+  .nc.on{background:#000;}
+</style>
+</head>
+<body>
+
+<!-- ============ 白底 · 真机原大 ============ -->
+<h2>白底 · 真机原大</h2>
+<div class="big">
+  <div class="box">
+    <svg class="s66" viewBox="0 0 100 100">
+      <path d="M50 14 L60 38 L84 41 L66 57 L71 81 L50 69 L29 81 L34 57 L16 41 L40 38 Z"
+            fill="none" stroke="#000" stroke-width="9" stroke-linejoin="round"/>
+    </svg>
+    <span class="t">空心</span>
+    <span class="u">66px · fill:none</span>
+  </div>
+
+  <div class="box">
+    <svg class="s66" viewBox="0 0 100 100">
+      <path d="M50 14 L60 38 L84 41 L66 57 L71 81 L50 69 L29 81 L34 57 L16 41 L40 38 Z"
+            fill="#000" stroke="#000" stroke-width="9" stroke-linejoin="round"/>
+    </svg>
+    <span class="t">实心</span>
+    <span class="u">66px · fill:#000</span>
+  </div>
+</div>
+
+<!-- ============ 三个尺寸档 ============ -->
+<h2>三个尺寸档（列表 42 / 菜单 46 / 底栏 66）</h2>
+<div class="row">
+  <div class="box">
+    <svg class="s42" viewBox="0 0 100 100">
+      <path d="M50 14 L60 38 L84 41 L66 57 L71 81 L50 69 L29 81 L34 57 L16 41 L40 38 Z"
+            fill="none" stroke="#000" stroke-width="9" stroke-linejoin="round"/>
+    </svg>
+    <span class="u">空心 42</span>
+  </div>
+  <div class="box">
+    <svg class="s42" viewBox="0 0 100 100">
+      <path d="M50 14 L60 38 L84 41 L66 57 L71 81 L50 69 L29 81 L34 57 L16 41 L40 38 Z"
+            fill="#000" stroke="#000" stroke-width="9" stroke-linejoin="round"/>
+    </svg>
+    <span class="u">实心 42</span>
+  </div>
+  <div class="box">
+    <svg class="s46" viewBox="0 0 100 100">
+      <path d="M50 14 L60 38 L84 41 L66 57 L71 81 L50 69 L29 81 L34 57 L16 41 L40 38 Z"
+            fill="none" stroke="#000" stroke-width="9" stroke-linejoin="round"/>
+    </svg>
+    <span class="u">空心 46</span>
+  </div>
+  <div class="box">
+    <svg class="s46" viewBox="0 0 100 100">
+      <path d="M50 14 L60 38 L84 41 L66 57 L71 81 L50 69 L29 81 L34 57 L16 41 L40 38 Z"
+            fill="#000" stroke="#000" stroke-width="9" stroke-linejoin="round"/>
+    </svg>
+    <span class="u">实心 46</span>
+  </div>
+  <div class="box">
+    <svg class="s66" viewBox="0 0 100 100">
+      <path d="M50 14 L60 38 L84 41 L66 57 L71 81 L50 69 L29 81 L34 57 L16 41 L40 38 Z"
+            fill="none" stroke="#000" stroke-width="7" stroke-linejoin="round"/>
+    </svg>
+    <span class="u">空心 66 / stroke 7</span>
+  </div>
+  <div class="box">
+    <svg class="s66" viewBox="0 0 100 100">
+      <path d="M50 14 L60 38 L84 41 L66 57 L71 81 L50 69 L29 81 L34 57 L16 41 L40 38 Z"
+            fill="#000" stroke="#000" stroke-width="7" stroke-linejoin="round"/>
+    </svg>
+    <span class="u">实心 66 / stroke 7</span>
+  </div>
+</div>
+
+<!-- ============ 黑底 ============ -->
+<h2>黑底（底栏选中那格）—— 星要翻成白色，心必须是黑的</h2>
+<div class="row">
+  <div class="box" style="background:#000;">
+    <svg class="s66" viewBox="0 0 100 100">
+      <path d="M50 14 L60 38 L84 41 L66 57 L71 81 L50 69 L29 81 L34 57 L16 41 L40 38 Z"
+            fill="none" stroke="#fff" stroke-width="7" stroke-linejoin="round"/>
+    </svg>
+    <span class="u" style="color:#888;">空心 · 黑底白线</span>
+  </div>
+  <div class="box" style="background:#000;">
+    <svg class="s66" viewBox="0 0 100 100">
+      <path d="M50 14 L60 38 L84 41 L66 57 L71 81 L50 69 L29 81 L34 57 L16 41 L40 38 Z"
+            fill="#fff" stroke="#fff" stroke-width="7" stroke-linejoin="round"/>
+    </svg>
+    <span class="u" style="color:#888;">实心 · 黑底白块</span>
+  </div>
+</div>
+
+<!-- ============ 底栏实景：星在五格里的位置 ============ -->
+<h2>底栏实景（第 4 格是星）</h2>
+<div class="nav">
+  <div class="nc"><svg class="s66" viewBox="0 0 100 100"><path d="M52 22 A32 32 0 1 1 20 54 M52 34 V54 H70" fill="none" stroke="#000" stroke-width="7"/><path d="M36 22 L56 11 L56 33 Z" fill="#000"/></svg></div>
+  <div class="nc"><svg class="s66" viewBox="0 0 100 100"><circle cx="43" cy="43" r="25" fill="none" stroke="#000" stroke-width="7"/><path d="M61 61 L84 84" stroke="#000" stroke-width="10"/></svg></div>
+  <div class="nc"><svg class="s66" viewBox="0 0 100 100"><path d="M12 48 L50 16 L88 48 M22 41 V86 H78 V41 M40 86 V62 H60 V86" fill="none" stroke="#000" stroke-width="7"/></svg></div>
+  <div class="nc"><svg class="s66" viewBox="0 0 100 100"><path d="M50 14 L60 38 L84 41 L66 57 L71 81 L50 69 L29 81 L34 57 L16 41 L40 38 Z" fill="none" stroke="#000" stroke-width="9" stroke-linejoin="round"/></svg></div>
+  <div class="nc on"><svg class="s66" viewBox="0 0 100 100"><path d="M50 14 L60 38 L84 41 L66 57 L71 81 L50 69 L29 81 L34 57 L16 41 L40 38 Z" fill="none" stroke="#fff" stroke-width="9" stroke-linejoin="round"/></svg></div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,274 @@
+// 图标 —— 对应 design/UI-SPEC.md 第 2.4 节。
+//
+// 为什么一律矢量画、不用字符（✕ ▶ ⌫ ★）：
+// 文泉驿微米黑里没有这些符号字形，画出来是**空白**（不是方框，是空白），
+// 而且不报任何错。所以图标只能用 Path 画。
+//
+// 走的不是 slint 的 svg feature（那要引入 resvg，二进体会变大），
+// 而是 Path + viewbox-* 四件套 —— 直接把规格书里的 viewBox="0 0 100 100"
+// 路径数据抄进来就行。
+//
+// ⚠️ Slint 的写法有几处和 SVG 不一样，踩过：
+//
+//   viewbox-x / viewbox-y / viewbox-width / viewbox-height  ← float，**不写单位**
+//   stroke-width                                            ← length，**要单位**（7px）
+//   stroke-line-cap: LineCap.square                         ← 不是 stroke-linecap
+//   stroke-line-join: LineJoin.round                        ← 不是 stroke-linejoin
+//   commands: "..."                                         ← **不能换行**，Slint 不支持 \ 续行
+//
+// ⚠️ **`fill` 千万别写 `transparent`，也别不写。** 详见 `Stroke` 上面那段 ——
+//    这块屏没有 alpha 通道，「透明」会被渲染成**纯黑**。
+//
+// 还有一条：**Path 的根上访问不到 `parent`**（编译报 Cannot access id 'parent'），
+// 所以 Stroke 的尺寸靠 `sz` 显式传进来，不能写 `width: parent.width`。
+//
+// 尺寸档位（规格 2.4）：
+//   底栏        66px  stroke 7   （缩后笔画约 4.6px，和文字笔画同量级）
+//   列表内标记  42px  stroke 9
+//   菜单行内    46px  stroke 9
+//   主页 Logo  190px  stroke 6
+// 不要为了精致把描边调细 —— 缩下去会看起来像没画。
+
+import { Tok } from "tokens.slint";
+
+/// 描边路径：只画线，**不填充**。viewBox 固定 0 0 100 100。
+///
+/// ⚠️⚠️ **千万别写 `fill: transparent`。**
+///
+/// 面板只有 16 档灰、**没有 alpha 通道**。「透明」是 `#00000000`，
+/// 丢掉 alpha 之后就是**纯黑** —— 想表达「不填充」，画出来是**填满黑**。
+///
+/// 这个坑是用户报的「收藏实心和空心看不出来」的**真正根因**：
+/// 空心星被填成了黑星，跟实心的一模一样。
+/// 而且它极难看出来 —— 之前查的时候把 `fill` 从 transparent 改成 tint
+/// 发现「渲染结果没变」，就误判成「这台渲染器不支持 fill」，
+/// 真相是**两个值都渲染成黑的，当然看不出差别**。
+///
+/// **正确写法是把 `fill` 显式设成背景色**（默认 `Tok.paper` = 白）。
+/// 画在黑底上时要显式传 `bg: Tok.ink`（底栏选中那格就是黑底白图标），
+/// 否则内部会被涂成白色、图标变成一坨实心白块。
+export component Stroke inherits Path {
+    in property <length> sz: 66px;
+    in property <length> stroke-w: 7px;
+    in property <brush> tint: Tok.ink;
+    /// 图标底下的背景色。**必须传对**（见上面那段）——
+    /// 它不是装饰，是「空心」这个效果赖以成立的东西。
+    in property <brush> bg: Tok.paper;
+
+    width: root.sz;
+    height: root.sz;
+    viewbox-x: 0;
+    viewbox-y: 0;
+    viewbox-width: 100;
+    viewbox-height: 100;
+    stroke: root.tint;
+    stroke-width: root.stroke-w;
+    stroke-line-cap: LineCap.square;
+    stroke-line-join: LineJoin.round;
+    // 把内部涂成**背景色**（不是 transparent、也不能不写）。
+    fill: root.bg;
+}
+
+/// 实心路径：整块填充。同样 viewBox 0 0 100 100。
+///
+/// 描边和填充同色 —— 目的是让**外形尺寸和描边版一致**
+/// （描边是骑在路径上的，一半画在外面；给实心版同样的描边宽度，
+/// 两个图标的轮廓就一样大，切换时不会看着忽大忽小）。
+export component SolidPath inherits Path {
+    in property <length> sz: 66px;
+    in property <length> stroke-w: 9px;
+    in property <brush> tint: Tok.ink;
+
+    width: root.sz;
+    height: root.sz;
+    viewbox-x: 0;
+    viewbox-y: 0;
+    viewbox-width: 100;
+    viewbox-height: 100;
+    fill: root.tint;
+    stroke: root.tint;
+    stroke-width: root.stroke-w;
+    stroke-line-join: LineJoin.round;
+}
+
+/// 图标的公共外壳：只管尺寸和颜色，具体路径由各图标自己填。
+///
+/// `bg` 是图标**底下那层的颜色**，必须和实际背景一致 ——
+/// 空心图标靠「把内部涂成背景色」来实现（见 `Stroke` 那段）。
+export component IconBase inherits Rectangle {
+    in property <length> icon-size: 66px;
+    in property <length> stroke-w: 7px;
+    in property <brush> tint: Tok.ink;
+    in property <brush> bg: Tok.paper;
+
+    width: root.icon-size;
+    height: root.icon-size;
+    background: transparent;
+}
+
+/// 历史：缺口钟表 + 实心回退箭头
+export component IcoHistory inherits IconBase {
+    Stroke {
+        sz: root.icon-size;
+        tint: root.tint;
+        bg: root.bg;
+        stroke-w: root.stroke-w;
+        commands: "M52 22 A32 32 0 1 1 20 54 M52 34 V54 H70";
+    }
+    // 箭头那个三角是**实心**的，所以走 SolidPath 而不是 Stroke
+    SolidPath {
+        sz: root.icon-size;
+        tint: root.tint;
+        stroke-w: root.stroke-w;
+        commands: "M36 22 L56 11 L56 33 Z";
+    }
+}
+
+/// 搜索：放大镜（手柄比镜圈粗，所以要两条路径）
+export component IcoSearch inherits IconBase {
+    Stroke {
+        sz: root.icon-size;
+        tint: root.tint;
+        bg: root.bg;
+        stroke-w: root.stroke-w;
+        commands: "M18 43 A25 25 0 1 0 68 43 A25 25 0 1 0 18 43";
+    }
+    Stroke {
+        sz: root.icon-size;
+        tint: root.tint;
+        bg: root.bg;
+        stroke-w: root.stroke-w * 10 / 7;
+        commands: "M61 61 L84 84";
+    }
+}
+
+/// 主页：房子
+export component IcoHome inherits IconBase {
+    Stroke {
+        sz: root.icon-size;
+        tint: root.tint;
+        bg: root.bg;
+        stroke-w: root.stroke-w;
+        commands: "M12 48 L50 16 L88 48 M22 41 V86 H78 V41 M40 86 V62 H60 V86";
+    }
+}
+
+/// 收藏：五角星。空心 = 描边 + 内部涂背景色，实心 = 整块填充。
+/// 两态共用**同一条路径**、**同一个描边宽度**，所以外轮廓完全重合，
+/// 切换时不会忽大忽小。
+///
+/// # ⚠️ 描边必须按尺寸等比，不能所有档位都写同一个数（2026-10-05 定案）
+///
+/// 这是「空心星看着是实心」的**唯一**根因，和 `fill` 无关。
+///
+/// 算一遍就清楚（viewBox 100，中心到边的最短距离 = **13.85 单位**）：
+/// 星形内部那个洞的半径 = `13.85 − 描边宽/2`。
+///
+/// | 图标 | 描边 | 描边(viewBox) | 洞半径 | 洞直径(物理px) |
+/// |---|---|---|---|---|
+/// | 42px | **9（原来的写死值）** | 21.4 | 3.1 | **1.3** ← 「只有两个像素是白的」 |
+/// | 42px | 3.8（`size×6/66`） | 9.1 | 9.3 | 7.8 |
+///
+/// 列表行原来从调用方传死 `stroke-w: 9px`，在 42px 的星上比例是 0.214，
+/// 是底栏那颗（66px / 7 = 0.106）的**两倍粗** —— 凹角被描边自己糊死，
+/// 于是「空心」和「实心」看着一模一样。
+/// 同一个 9px 还让实心那颗向外胖了一圈（半径 36 → 46.7），就是「实心太胖」。
+///
+/// **两个毛病是同一个变量**：描边粗。按 `icon-size × 6/66` 等比取即可。
+///
+/// # 排查时踩过的两个坑，别再踩
+///
+/// 1. **别用「改 fill 看有没有变化」来判定 fill 生不生效** —— 描边 9px
+///    已经把整颗星盖住了，`fill` 填黑还是填白都看不出差别，很容易
+///    误判成「`fill` 不画」。判定要用 `stroke-w: 0px`（只留填充）：
+///    星星还在 = `fill` 生效（实测：**生效**）。
+/// 2. **别为了「洞更大」去加大内半径** —— 试过 15.6 → 25，洞是大了，
+///    但凹角被一起抹平，星形变成胖五边形，反而不像星星。
+///    凹角是星星的命，宁可洞小一点。
+export component IcoStar inherits IconBase {
+    in property <bool> solid: false;
+
+    /// 描边宽度。**由 icon-size 推导，调用方不用传、传了也不用** ——
+    /// 写死一个数（原来各处的 `stroke-w: 9px`）正是上面那个 bug 的来源。
+    private property <length> sw: root.icon-size * 6 / 66;
+
+    if !root.solid : Stroke {
+        sz: root.icon-size;
+        tint: root.tint;
+        bg: root.bg;
+        stroke-w: root.sw;
+        // **标准五角星**（外半径 36 / 内半径 15.6）—— 凹角保留。
+        // 和实心那条是同一条路径。
+        commands: "M50 14 L60 38 L84 41 L66 57 L71 81 L50 69 L29 81 L34 57 L16 41 L40 38 Z";
+    }
+    if root.solid : SolidPath {
+        sz: root.icon-size;
+        tint: root.tint;
+        // 和空心同宽同色：填充给「实心」，描边让外轮廓和空心对上。
+        stroke-w: root.sw;
+        commands: "M50 14 L60 38 L84 41 L66 57 L71 81 L50 69 L29 81 L34 57 L16 41 L40 38 Z";
+    }
+}
+
+/// 设置：推子（三条带滑钮的横线）。
+/// 用推子不用齿轮 —— 齿轮的齿在 66px 下会糊成一坨，推子的横线够长、缩下去还清楚。
+export component IcoSettings inherits IconBase {
+    Stroke {
+        sz: root.icon-size;
+        tint: root.tint;
+        bg: root.bg;
+        stroke-w: root.stroke-w;
+        commands: "M10 28 H25 M55 28 H90 M10 50 H45 M75 50 H90 M10 72 H25 M55 72 H90 M29 28 A11 11 0 1 0 51 28 A11 11 0 1 0 29 28 M49 50 A11 11 0 1 0 71 50 A11 11 0 1 0 49 50 M29 72 A11 11 0 1 0 51 72 A11 11 0 1 0 29 72";
+    }
+}
+
+/// 候选词翻页：往左的尖角（设计稿 v6）。
+/// 形状就是一个折角，不是字符「<」—— 字符在文泉驿里画不出来。
+export component IcoChevLeft inherits IconBase {
+    Stroke {
+        sz: root.icon-size;
+        tint: root.tint;
+        bg: root.bg;
+        stroke-w: root.stroke-w;
+        commands: "M64 20 L30 50 L64 80";
+    }
+}
+
+/// 候选词翻页：往右的尖角。
+export component IcoChevRight inherits IconBase {
+    Stroke {
+        sz: root.icon-size;
+        tint: root.tint;
+        bg: root.bg;
+        stroke-w: root.stroke-w;
+        commands: "M36 20 L70 50 L36 80";
+    }
+}
+
+/// 退出程序：**电源符号**（设计稿 `design/icon-exit.html` 里的「丙」）。
+///
+/// 为什么用电源符号而不是「门 + 箭头」（那个是甲）：
+/// 甲读作「退出到上一层」，「丙」才明确是「**关掉这个程序**」。
+/// 应用里已经有「退出阅读 → 返回书架」了，两个都用箭头形的会看错。
+///
+/// 一段开口圆弧 + 一根竖线 —— 竖线正好盖在圆弧的缺口上。
+export component IcoPower inherits IconBase {
+    Stroke {
+        sz: root.icon-size;
+        tint: root.tint;
+        bg: root.bg;
+        stroke-w: root.stroke-w;
+        commands: "M34 26 A32 32 0 1 0 66 26 M50 10 V48";
+    }
+}
+
+/// 主页 Logo：摊开的书
+export component IcoBook inherits IconBase {
+    Stroke {
+        sz: root.icon-size;
+        tint: root.tint;
+        bg: root.bg;
+        stroke-w: root.stroke-w;
+        commands: "M50 26 V86 M50 26 C42 17 28 15 15 17 V79 C28 77 42 79 50 86 M50 26 C58 17 72 15 85 17 V79 C72 77 58 79 50 86";
+    }
+}

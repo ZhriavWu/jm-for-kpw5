@@ -1,0 +1,42 @@
+# ---- 构建产物 ----
+target/
+*.o
+*.a
+*.so
+
+# 真机二进制（自己编译，别提交）
+kual/extensions/kindle-manga/kindle-manga
+kual/extensions/kindle-manga/kindle-manga-server
+kual/*.zip
+server/kindle-manga-server
+server/kindle-manga-server.exe
+
+# ---- 运行时文件（在 Kindle 上生成，也可能含个人数据）----
+server.txt
+refresh.txt
+history.json
+favorites.json
+search_history.json
+reader_hint_seen.txt
+*.part
+
+# ---- 测试样本（受版权保护的漫画页，自己准备）----
+samples/
+
+# ---- 图片缓存 ----
+cache/
+cache_*/
+_mnt_us_cache/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 一次性排查脚本（本地保留，不进仓库）----
+# 需要的话自己按需保留
+_shot_*.png
+_gotest/

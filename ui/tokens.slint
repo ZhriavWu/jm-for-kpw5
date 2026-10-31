@@ -1,0 +1,48 @@
+// 设计令牌 —— 对应 design/UI-SPEC.md 第 2 节。
+//
+// ⚠️ 全稿只用这**六档灰**，出现第七档就是 bug（验收清单第 1 条）。
+// 面板只有 16 级灰，且 238~255 之间是空的 ——
+// 「很浅的灰」（比如 #F5F5F5）做不出来，落到哪一档取决于驱动取整，
+// 表现是一片深浅不匀的色带。所以分层一律靠「黑框 + 纯白」，不靠浅灰底。
+
+export global Tok {
+    /// 主文字、边框、反白底          灰阶 0
+    out property <color> ink: #000000;
+    /// 次级文字（说明、当前值）      灰阶 5
+    out property <color> g5: #555555;
+    /// 分隔线                        灰阶 8
+    out property <color> g8: #888888;
+    /// 禁用态                        灰阶 9
+    out property <color> g9: #999999;
+    /// 占位框、不可见图示            灰阶 12
+    out property <color> g12: #cccccc;
+    /// 背景、卡片                    灰阶 15
+    out property <color> paper: #ffffff;
+
+    // ---- 描边（规格 2.2）----
+    // 1px 的线在墨水屏上会被采样吃成断线，看起来像没画。底线 2px。
+    /// 分隔线：列表行间、键盘键间、设置行间
+    out property <length> hairline: 2px;
+    /// 主边框：卡片、按钮、面板、输入框
+    out property <length> border: 3px;
+
+    // ---- 面板尺寸（规格 8）----
+    // 写死而不是用 parent.width：**Slint 里组件根上访问不到 `parent`**
+    // （编译报 Cannot access id 'parent'），而面板本来就是固定的 1236×1648，
+    // 写死既合法又贴合这块屏的事实。
+    out property <length> screen-w: 1236px;
+    out property <length> screen-h: 1648px;
+
+    // ---- 骨架高度（规格 3、8）----
+    out property <length> nav-h: 108px;      // 底栏
+    out property <length> status-h: 88px;    // 顶部反白状态条
+    out property <length> appbar-h: 128px;   // 内页顶栏
+    out property <length> pager-h: 140px;    // 翻页条
+
+    // ---- 字号（规格 2.3）----
+    out property <length> fs-page-title: 56px;   // 页面大标题
+    out property <length> fs-input: 44px;        // 输入框正文、候选词
+    out property <length> fs-item: 36px;         // 列表项标题
+    out property <length> fs-key: 40px;          // 键盘字母
+    out property <length> fs-meta: 28px;         // 次级说明
+}
