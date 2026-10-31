@@ -451,8 +451,10 @@ lastSegment(strings.TrimPrefix(path, "/api/history/"))
 
 ## 已知限制
 
-- 只在 **Kindle Paperwhite 5** 上验证过。其他机型的面板尺寸、EPDC ioctl 变体
-  可能不同（后端里有探测逻辑，但没有设备可测）
+- 只在 **Kindle Paperwhite 5 + 系统版本 5.19.2**
+  （`039-juno_1902_malbec_bellatrix-432036`）上验证过。
+  其他机型 / 固件的面板尺寸、EPDC ioctl 变体可能不同（后端里有探测逻辑，
+  但没有设备可测）
 - 服务端依赖第三方站点的接口，**它们改接口就会失效**
 - 只用 Linux 内核的接口（`/dev/fb0`、`/dev/input/event*`、`lipc-set-prop`），
   没有其他平台支持
