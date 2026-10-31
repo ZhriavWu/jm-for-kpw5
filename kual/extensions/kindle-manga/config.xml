@@ -8,7 +8,7 @@
 <extension>
   <information>
     <name>JMcomic for kindle</name>
-    <version>1.2.0</version>
+    <version>1.2.1</version>
     <!-- & 必须写成 &amp;，否则 XML 非法，KUAL 会读不了这个扩展 -->
     <author>Zhriav-Wu&amp;Deepseek</author>
     <id>kindle-manga</id>

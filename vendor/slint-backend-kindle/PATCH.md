@@ -46,12 +46,30 @@ if rotation_changed {
 `RefreshPolicy`：局部刷新计数器 + 间隔配置。
 
 ```rust
-pub fn set_interval(&self, n: u32)      // 0 = 关掉，回到上游行为
+pub fn set_interval(&self, n: u32)                             // 0 = 关掉
 pub fn interval(&self) -> u32
-pub fn force_next_refresh(&self)        // 下一次无条件全刷（一发即止）
-pub(crate) fn wants_full_refresh(&self) // 事件循环每帧问一次
-pub(crate) fn note_full_refresh(&self)  // 已经全刷过了，计数归零
+pub fn force_next_refresh(&self)                               // 下次无条件全刷
+pub(crate) fn wants_full_refresh(&self, dirty: u64, panel: u64) // 每帧问一次
+pub(crate) fn note_full_refresh(&self)                         // 计数归零
 ```
+
+#### 面积参数是后加的（`MIN_AREA_PERCENT = 2`）
+
+第一版只数「刷新次数」，于是踩了一个很显眼的坑：**加载圈每 250ms 换一格，
+每 N 次就整屏全刷一次 —— 用户看到的就是「转圈时整个屏幕一直闪黑白」**。
+
+那个圈只有 44×44（占面板 0.1%），根本不积累残影。所以现在：
+
+* 脏区域 < 面板的 2% → **不计数、不触发全刷**，只走局部刷新；
+* ≥ 2% → 照旧计数。
+
+`force_next_refresh()` **不受**面积判断影响（用户改完设置要立刻看到效果）。
+
+| 变化 | 面积占比 |
+|---|---|
+| 加载圈 44×44 | 0.1% |
+| 列表一行 | ~5% |
+| 整页翻页 | 100% |
 
 `set_interval` **不会**顺手强制全刷一次。分开的理由：启动装载配置时也走
 `set_interval`，那时强制全刷纯属浪费（后端进事件循环前已经全刷过一次）。
@@ -79,10 +97,14 @@ if size.width == 0 || size.height == 0 {
 } else if rotation_changed {
     frame_buffer.refresh_full();
     self.refresh_policy.note_full_refresh();
-} else if self.refresh_policy.wants_full_refresh() {
+} else if self.refresh_policy.wants_full_refresh(
+    (w as u64) * (h as u64),                                        // 脏矩形面积
+    (frame_buffer.width as u64) * (frame_buffer.height as u64),     // 面板面积
+) {
     log::debug!("全屏刷新（按策略清残影）");
     frame_buffer.refresh_full();
 } else {
+    // 面积小的更新（加载圈）也走这里 —— 上面已经把它们排除在计数之外
     frame_buffer.refresh_region(origin, size);
 }
 ```
@@ -119,8 +141,8 @@ done
    新版若改了绘制回调的结构，比对 `refresh_policy.wants_full_refresh()` 的
    插入点即可
 5. `cargo test --workspace --target x86_64-unknown-linux-gnu`
-   —— `refresh.rs` 里那 8 条测试会验证策略逻辑
-6. 真机上确认翻页时屏幕会闪（全刷的特征）
+   —— `refresh.rs` 里那 **16 条**测试会验证策略逻辑（含面积分档）
+6. 真机上确认：翻页时屏幕会闪（全刷的特征），而**加载圈转动时整屏不闪**
 
 ## 应用侧
 

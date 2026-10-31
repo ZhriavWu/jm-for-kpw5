@@ -312,11 +312,17 @@ impl Platform for KindlePlatform {
                 } else if rotation_changed {
                     frame_buffer.refresh_full();
                     self.refresh_policy.note_full_refresh();
-                } else if self.refresh_policy.wants_full_refresh() {
+                } else if self.refresh_policy.wants_full_refresh(
+                    (w as u64) * (h as u64),
+                    (frame_buffer.width as u64) * (frame_buffer.height as u64),
+                ) {
                     // 只在 debug 打：默认间隔是 1，用 info 会每帧刷一行日志
                     log::debug!("全屏刷新（按策略清残影）");
                     frame_buffer.refresh_full();
                 } else {
+                    // ⚠️ 面积很小的更新（加载圈那种 44×44）也走这里 ——
+                    // 上面的 `wants_full_refresh` 已经替我们把它们排除在计数之外了，
+                    // 所以转圈不会再把整屏刷黑。
                     frame_buffer.refresh_region(origin, size);
                 }
             });
