@@ -121,7 +121,7 @@ func main() {
 	cacheDir := flag.String("cache", envOr("JM_CACHE_DIR", defaultCacheDir()), "图片缓存目录")
 	histPath := flag.String("history", envOr("JM_HISTORY", "history.json"), "观看记录文件")
 	readyFile := flag.String("ready", "", "启动成功后写这个文件（给启动脚本判就绪用）")
-	cacheMaxMB := flag.Int("cache-max-mb", 2048, "缓存上限（MB），0 = 不限制")
+	cacheMaxMB := flag.Int("cache-max-mb", 1024, "缓存上限（MB），0 = 不限制")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags)
@@ -221,6 +221,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/history/", s.handleHistory)
 	mux.HandleFunc("/api/prefetch", s.handlePrefetch)
 	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/cache", s.handleCache)
 	mux.HandleFunc("/img/", s.handleImage)
 	mux.HandleFunc("/cover/", s.handleCover)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -269,11 +270,15 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			"DEL  /api/history/<album_id>",
 			"GET  /img/<photo_id>/<page>",
 			"GET  /cover/<album_id>",
+			"GET  /api/cache               用量统计",
+			"POST /api/cache  {max_mb}     改上限（会立刻清理）",
+			"POST /api/cache  {clear:true} 清空磁盘缓存",
 		},
 		"notes": []string{
 			"服务端不解码：/img 发的是源站原图（多半是 webp），解密在客户端",
 			"/api/photo 的每页带 seg（分割数），客户端据此做横条重排",
 			"页码从 0 开始；越界返回 404",
+			"max_mb = 0 表示不限制；超上限时按最久未访问删除",
 		},
 	})
 }

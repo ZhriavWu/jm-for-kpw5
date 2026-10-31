@@ -208,12 +208,32 @@ else
 fi
 
 echo
-echo "=== 18. 阅读器必须有加载界面（翻页要几秒，不能毫无反馈）==="
-READERBLK=$(awk '$0 ~ "if root.screen == 8 : Rectangle", /^    \}$/' app.slint | sed 's|//.*||')
-if echo "$READERBLK" | grep -q 'root.loading'; then
-  echo "  OK   阅读器里有加载提示"
+echo "=== 18. 必须有全局加载圈（翻页/搜索要几秒，不能毫无反馈）==="
+#
+# 原来查的是「阅读器那块里有没有 root.loading」。后来加载反馈统一成了
+# **全站一个右下角的转圈**（SpinRing），阅读器那块居中面板删掉了 ——
+# 所以这条改成查「转圈覆盖层还在不在」，而不是查某一屏里的局部标记。
+#
+# ⚠️ 仍然要剥注释：上面这几行说明里就写着 `root.loading` 和 `SpinRing`。
+ALL=$(cat *.slint | sed 's|//.*||')
+if echo "$ALL" | grep -q 'if root.spin-shown : SpinRing'; then
+  echo "  OK   有全局加载圈覆盖层（if root.spin-shown : SpinRing）"
 else
-  echo "  *** 阅读器里没有加载提示 —— 翻页期间屏幕上什么都不会变"; FAIL=1
+  echo "  *** 找不到加载圈覆盖层 —— 加载期间屏幕上什么都不会变"; FAIL=1
+fi
+
+# 转圈必须真的会「变」：Rust 侧要有推进相位的定时消息，否则就是一个静止的圈。
+if grep -q 'SPIN_INTERVAL_MS' ../src/main.rs && grep -q 'Cmd::SpinTick' ../src/main.rs; then
+  echo "  OK   Rust 侧有相位推进（SpinTick）"
+else
+  echo "  *** 转圈不会动 —— 找不到 SpinTick 推进逻辑"; FAIL=1
+fi
+
+# 软件渲染器不支持 rotation-angle，转圈只能靠预生成的多段路径。
+if grep -q 'ArcPaths' chrome.slint && grep -q 'commands: ArcPaths.all' chrome.slint; then
+  echo "  OK   转圈用预生成的圆弧路径（软件渲染器不支持 rotation-angle）"
+else
+  echo "  *** 找不到 ArcPaths —— 转圈可能用上了 rotation-angle，真机上不会转"; FAIL=1
 fi
 
 echo

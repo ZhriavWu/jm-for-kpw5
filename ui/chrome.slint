@@ -422,6 +422,102 @@ export component CoverCell inherits Rectangle {
     }
 }
 
+/// 加载圈：**一个带缺口的圆环**（约 3/4 圈），纯黑、加厚描边，一格一格地转。
+///
+/// 形状照用户给的设计稿：`viewBox 5.5 / r=2.25 / stroke=0.5 / dasharray 10.6 3.54`
+/// —— 也就是「圆环 + 1/4 圈缺口」，描边约占直径 11%。
+/// 这里放大到 44px 盒子：圆心 (22,22)、r=17、stroke 6px（占直径 17.6%，
+/// 比设计稿再厚一点，用户说的「有点厚」）。
+///
+/// # 为什么是 12 段写死的路径
+///
+/// 理想做法是画一个圆环然后加 `rotation-angle`。**但软件渲染器不支持旋转**：
+///
+/// ```
+/// i-slint-renderer-software-1.18.1/lib.rs:3234
+///     const SUPPORTS_TRANSFORMATIONS: bool = false;
+/// ```
+///
+/// 而真机（Kindle）走的就是软件渲染器 —— 加旋转在桌面上可能看着对，
+/// 到真机上就不转了。所以改成**预生成 12 段圆弧**，按 `phase` 选一段。
+///
+/// # 为什么不是动画
+///
+/// 墨水屏上连续旋转会拖一串残影，而且 `check-ui-spec.sh` 第 2 条禁止
+/// `Timer` / `animate`。这里由 Rust 每 250ms 推一次 `phase`，
+/// 每次只有这 44×44 的一小块变化 —— 局部刷新，几乎看不见闪。
+///
+/// ⚠️ 32ms 一格转一圈就是 3 秒，和用户给的 CSS（`spin 3s linear`）一致。
+export component SpinRing inherits Rectangle {
+    /// 转到了第几格（0..11）
+    in property <int> phase: 0;
+
+    width: 44px;
+    height: 44px;
+    background: transparent;
+
+    // 白色圆底。
+    //
+    // ⚠️ 必须**单独画一个圆**，不能让下面那条路径去填 ——
+    //    路径是开口圆弧，填充会隐式闭合出一个月牙/饼形，不是想要的形状。
+    //    圆底还有个好处：圈可能盖在漫画上，有白底才看得清。
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        border-radius: 22px;
+        background: Tok.paper;
+    }
+
+    Path {
+        x: 0;
+        y: 0;
+        width: 44px;
+        height: 44px;
+        viewbox-width: 44;
+        viewbox-height: 44;
+        commands: ArcPaths.all[Math.mod(root.phase, 12)];
+        stroke: Tok.ink;
+        stroke-width: 6px;
+        // 设计稿是 stroke-linecap: butt —— 方头会让缺口看着变窄
+        stroke-line-cap: LineCap.butt;
+        stroke-line-join: LineJoin.round;
+        // ⚠️ 一定要显式给填充色（项目里那条踩过好几次的规矩）：
+        //    不写或写 transparent 在这块屏上会被渲染成纯黑，整个圆变成实心黑饼。
+        fill: Tok.paper;
+    }
+}
+
+/// 12 段圆弧的路径数据，每段 270°、缺口 90°，依次转 30°。
+///
+/// 由脚本生成（圆心 22,22 / r=17），不要手改：
+///
+/// ```
+/// for p in range(12):
+///     a0 = -90 + p*30; a1 = a0 + 270
+///     "M {x(a0)} {y(a0)} A 17 17 0 1 1 {x(a1)} {y(a1)}"
+/// ```
+///
+/// `A` 后面的 `0 1 1` = x-axis-rotation 0、large-arc 1（270° > 180°）、
+/// sweep 1（顺时针，屏幕坐标 y 向下）。
+export global ArcPaths {
+    out property <[string]> all: [
+        "M 22 5 A 17 17 0 1 1 5 22",       // 0°
+        "M 30.5 7.3 A 17 17 0 1 1 7.3 13.5",   // 30°
+        "M 36.7 13.5 A 17 17 0 1 1 13.5 7.3",  // 60°
+        "M 39 22 A 17 17 0 1 1 22 5",      // 90°
+        "M 36.7 30.5 A 17 17 0 1 1 30.5 7.3",  // 120°
+        "M 30.5 36.7 A 17 17 0 1 1 36.7 13.5", // 150°
+        "M 22 39 A 17 17 0 1 1 39 22",     // 180°
+        "M 13.5 36.7 A 17 17 0 1 1 36.7 30.5", // 210°
+        "M 7.3 30.5 A 17 17 0 1 1 30.5 36.7",  // 240°
+        "M 5 22 A 17 17 0 1 1 22 39",      // 270°
+        "M 7.3 13.5 A 17 17 0 1 1 13.5 36.7",  // 300°
+        "M 13.5 7.3 A 17 17 0 1 1 7.3 30.5",   // 330°
+    ];
+}
+
 /// 全站通用的一行列表项（规格 4.1）：
 /// [缩略图 72×96] gap 26 [标题 flex:1] [右侧元信息] [可选：星标]
 export component ListLine inherits Rectangle {

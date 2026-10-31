@@ -589,6 +589,81 @@ pub fn post_history(base: &str, id: &str, title: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// `/api/cache` 的响应。
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct CacheStats {
+    /// 精确到字节的用量。界面只用 MB/GB，留着是因为排查问题时
+    /// 「到底差了多少字节」比两位小数的 MB 有用。
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub used_bytes: u64,
+    #[serde(default)]
+    pub used_mb: u64,
+    /// 0 = 不限制
+    #[serde(default)]
+    pub limit_mb: u64,
+    /// 缓存了多少个文件（排查用，界面不显示）
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub files: u64,
+}
+
+impl CacheStats {
+    /// 设置页那一行要显示的文字。
+    ///
+    /// 用量大于 1 GB 时用 GB 显示，否则用 MB —— 「已用 312 MB / 1 GB」
+    /// 比「已用 312 MB / 1024 MB」好读。
+    pub fn describe(&self) -> String {
+        let used = if self.used_mb >= 1024 {
+            format!("{:.1} GB", self.used_mb as f64 / 1024.0)
+        } else {
+            format!("{} MB", self.used_mb)
+        };
+        let limit = if self.limit_mb == 0 {
+            "不限制".to_string()
+        } else if self.limit_mb >= 1024 {
+            format!("{} GB", self.limit_mb / 1024)
+        } else {
+            format!("{} MB", self.limit_mb)
+        };
+        format!("已用 {used} / 上限 {limit}")
+    }
+}
+
+fn cache_request(base: &str, body: Option<Vec<u8>>) -> Result<CacheStats, ApiError> {
+    let url = join(base, "/api/cache");
+    let resp = match &body {
+        Some(b) => http_request(
+            &url,
+            Method::Post("application/json"),
+            Some(("application/json", b)),
+            FAST_TIMEOUT,
+        )?,
+        None => http_request(&url, Method::Get, None, FAST_TIMEOUT)?,
+    };
+    if resp.status >= 400 {
+        return Err(server_error_msg(resp.status, &resp.body));
+    }
+    serde_json::from_slice::<CacheStats>(&resp.body)
+        .map_err(|e| ApiError::Bad(format!("缓存接口返回的不是预期 JSON: {e}")))
+}
+
+/// 查磁盘缓存用量。
+pub fn cache_stats(base: &str) -> Result<CacheStats, ApiError> {
+    cache_request(base, None)
+}
+
+/// 改缓存上限（MB，0 = 不限制）。服务端会立刻按新上限清理一次。
+pub fn set_cache_limit(base: &str, mb: u32) -> Result<CacheStats, ApiError> {
+    let body = format!("{{\"max_mb\":{mb}}}").into_bytes();
+    cache_request(base, Some(body))
+}
+
+/// 清空磁盘缓存。
+pub fn clear_cache(base: &str) -> Result<CacheStats, ApiError> {
+    cache_request(base, Some(b"{\"clear\":true}".to_vec()))
+}
+
 /// 带重试地跑一个请求，返回结果和**实际用掉的尝试次数**。
 ///
 /// # 为什么需要这个

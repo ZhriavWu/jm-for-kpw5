@@ -40,6 +40,7 @@
 import { Tok } from "tokens.slint";
 import {
     NavBar, StatusBar, AppBar, PagerBar, BtnBox, BtnOutline, ListLine, CoverCell,
+    SpinRing,
 } from "chrome.slint";
 import { IcoStar, IcoBook, IcoChevLeft, IcoChevRight, IcoPower } from "icons.slint";
 
@@ -166,8 +167,10 @@ component SetRow inherits Rectangle {
     in property <string> value: "";
     callback hit();
 
+    // ⚠️ 130 而不是 149：设置页要放 8 行（多了「缓存上限」「已用空间」），
+    //    3 组标题 × 72 + 8 行 × 130 = 1256 正好铺满内容区。
     width: 1116px;
-    height: 149px;
+    height: 130px;
     background: Tok.paper;
 
     Rectangle {
@@ -545,7 +548,14 @@ export component AppWindow inherits Window {
     in property <string> set-conn: "";
     in property <string> refresh-label: "";
     in property <bool> refresh-available: false;
-    in property <string> cache-label: "";
+    /// 「缓存上限」行右边，如「1 GB　点此修改」
+    in property <string> cache-limit-label: "";
+    /// 「已用空间」行右边，如「已用 312 MB / 上限 1 GB　点此清空」
+    in property <string> cache-used-label: "";
+    /// 加载圈转到第几格（0..11）
+    in property <int> spin-phase: 0;
+    /// 现在要不要画加载圈
+    in property <bool> spin-shown: false;
     in property <string> version-label: "";
     in property <string> device-label: "";
     in property <string> server-label: "";
@@ -661,6 +671,8 @@ export component AppWindow inherits Window {
     callback set-edit-server();
     callback set-recheck();
     callback set-clear-cache();
+    /// 「缓存上限」点一下 → 轮到下一档
+    callback set-cycle-cache-limit();
     /// 设置两页之间翻页
     callback page-left();
     callback page-right();
@@ -1380,6 +1392,9 @@ export component AppWindow inherits Window {
             height: 1256px;
             background: transparent;
 
+            // ⚠️ 行高从 149 压到 **130** 才塞得下 8 行：
+            //    3 组标题 × 72 + 8 行 × 130 = 216 + 1040 = 1256，正好铺满。
+            //    用 149 的话会多出 149px，最后一行的「已用空间」被翻页条盖住。
             SetGroup { y: 0; title: "服务器"; }
             SetRow {
                 y: 72px;
@@ -1388,40 +1403,46 @@ export component AppWindow inherits Window {
                 hit => { root.set-edit-server(); }
             }
             SetRow {
-                y: 72px + 149px;
+                y: 202px;
                 label: "连接状态";
                 value: root.set-conn;
                 hit => { root.set-recheck(); }
             }
 
-            SetGroup { y: 72px + 298px; title: "阅读"; }
+            SetGroup { y: 332px; title: "阅读"; }
             SetRow {
-                y: 72px + 298px + 72px;
+                y: 404px;
                 label: "全屏刷新";
                 value: root.refresh-available ? root.refresh-label + "　点此修改" : "（本机不支持）";
                 hit => { root.set-edit-refresh(); }
             }
             SetRow {
-                y: 72px + 298px + 72px + 149px;
+                y: 534px;
                 label: "翻页热区";
                 value: "左中右 三等分";
             }
             SetRow {
-                y: 72px + 298px + 72px + 298px;
+                y: 664px;
                 label: "图片格式";
                 value: "原图 webp";
             }
             SetRow {
-                y: 72px + 298px + 72px + 447px;
+                y: 794px;
                 label: "候选词每页";
                 value: "5 个（横排一行）";
             }
 
-            SetGroup { y: 72px + 298px + 72px + 596px; title: "存储"; }
+            SetGroup { y: 924px; title: "存储"; }
             SetRow {
-                y: 72px + 298px + 72px + 596px + 72px;
-                label: "下载缓存";
-                value: root.cache-label;
+                y: 996px;
+                label: "缓存上限";
+                value: root.cache-limit-label;
+                hit => { root.set-cycle-cache-limit(); }
+            }
+            SetRow {
+                y: 1126px;
+                label: "已用空间";
+                value: root.cache-used-label;
                 hit => { root.set-clear-cache(); }
             }
         }
@@ -2583,68 +2604,13 @@ export component AppWindow inherits Window {
             }
         }
 
-        // ---- 加载界面（「看的时候」的反馈）----
+        // 加载反馈：**只用全局那个右下角的转圈**（见 app.slint 文件末尾的
+        // SpinRing 覆盖层）。
         //
-        // 翻一页要传几百 KB，真机上好几秒。原来这段时间**屏幕上什么都不变**，
-        // 用户以为点了没反应。现在盖一块居中的面板：文字 + 六个方块。
-        //
-        // 为什么不铺满整屏：上一页还留在屏幕上，整屏刷白再刷出下一页，
-        // 墨水屏要多闪一次；只盖中间一块，周围还能看见自己在第几页。
-        //
-        // 不画转圈动画（规格：墨水屏上会留一串残影）。
-        // 首次进阅读器时不盖 —— 那一屏有一次性的「怎么翻页」说明，
-        // 两块面板会叠在一起；第一页在说明背后默默加载。
-        // 尺寸按用户反馈**收小**过一轮：原来 900×300 盖住了太多画面。
-        // 现在 560×196，大约只占整屏的 3/4 宽、1/8 高，周围留出更多漫画。
-        if root.loading && !root.reader-hint : Rectangle {
-            x: (Tok.screen-w - 560px) / 2;
-            y: (Tok.screen-h - 196px) / 2;
-            width: 560px;
-            height: 196px;
-            background: Tok.paper;
-            border-width: Tok.border;
-            border-color: Tok.ink;
-
-            Text {
-                x: 24px;
-                y: 16px;
-                width: parent.width - 48px;
-                height: 52px;
-                text: root.loading-text;
-                color: Tok.ink;
-                font-size: 34px;
-                font-weight: 700;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-
-            // 六个方块：已加载的填黑。只有翻页有可量化的进度，
-            // 其余加载（打开章节等）保持空心，靠上面的文字说明。
-            // 6×32 + 5×24 = 312，在 560 宽的框里居中。
-            for i in 6 : Rectangle {
-                width: 32px;
-                height: 32px;
-                x: (parent.width - (6 * 32px + 5 * 24px)) / 2 + i * 56px;
-                y: 84px;
-                border-width: 3px;
-                border-color: Tok.ink;
-                background: i < root.loaded-count ? Tok.ink : Tok.paper;
-            }
-
-            Text {
-                x: 24px;
-                y: 132px;
-                width: parent.width - 48px;
-                height: 44px;
-                text: "首次加载会慢一点";
-                color: Tok.g5;
-                font-size: 24px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-        }
+        // 原来这里还有一块居中的「文字 + 六个方块」面板。加了转圈之后
+        // 两个指示器是重复的，而且那块面板会盖住漫画 —— 用户早就说过
+        // 「太占地方」，所以删掉了。要恢复的话，那段代码在 git 历史里
+        // （提交「加载界面尺寸按用户反馈收小」那一版）。
     }
 
     // ================================================================
@@ -2840,6 +2806,28 @@ export component AppWindow inherits Window {
             active: root.nav-active;
             picked(i) => { root.nav-picked(i); }
         }
+    }
+
+    // ================================================================
+    // 加载圈（全站通用）
+    //
+    // 位置：**右下角**。底栏那 5 个格子占了最下面 108px，所以有底栏的屏
+    // 要往上让开；阅读器真全屏，直接贴右下角。
+    //
+    // ⚠️ **为什么不放在 Slint 里做动画**：墨水屏连续重绘会拖残影，而且
+    //    `check-ui-spec.sh` 第 2 条禁止 `Timer` / `animate`。这里只是
+    //    按 Rust 递过来的 `spin-phase` 换个点变黑，每 320ms 一次，
+    //    一次只重画 44×44 这一小块。
+    //
+    // 放在键盘覆盖层**之前**声明：数字键盘弹出时应该盖住它。
+    // ================================================================
+    if root.spin-shown : SpinRing {
+        x: Tok.screen-w - 24px - self.width;
+        // 阅读器真全屏 → 贴右下角；其余屏要依次让开底栏（108）和翻页条（140），
+        // 否则会压在「下一页」按钮上。
+        y: Tok.screen-h - 24px - self.height
+            - (root.screen == 8 ? 0px : (Tok.nav-h + Tok.pager-h));
+        phase: root.spin-phase;
     }
 
     // ================================================================

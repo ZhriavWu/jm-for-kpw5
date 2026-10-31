@@ -345,12 +345,31 @@ else
         :
     else
         rm -f "$SRV_READY"
-        echo "start built-in server: $SRV_BIN"
+
+        # 缓存上限：用户可以在设置里改，值存在 cache_limit.txt。
+        # 这里是**启动那一刻**读一次；运行中改的话客户端会走
+        # POST /api/cache 通知这个进程（见 src/main.rs 的 push_cache_limit）。
+        #
+        # ⚠️ 校验要**严格**：整份内容必须是一个纯数字。
+        #    原来用 `tr -cd '0-9'` 抽数字，于是被改坏的 "12x8" 会变成 128 ——
+        #    一个用户没设过的值。宁可整个作废回默认，也别猜他想说什么。
+        CACHE_MB=$(cat "$DIR/cache_limit.txt" 2>/dev/null | tr -d ' \t\r\n')
+        case "$CACHE_MB" in
+            ''|*[!0-9]*) CACHE_MB=1024 ;;
+        esac
+        # 去掉前导 0（"0512" 在某些 shell 的 [ -gt ] 里会被当八进制）
+        CACHE_MB=$(echo "$CACHE_MB" | sed 's/^0*//')
+        [ -z "$CACHE_MB" ] && CACHE_MB=0
+        # 大于 64 GB 一律当没写（文件被改坏时别变成「不限制」）
+        [ "$CACHE_MB" -gt 65536 ] 2>/dev/null && CACHE_MB=1024
+
+        echo "start built-in server: $SRV_BIN (cache max ${CACHE_MB}MB)"
         "$SRV_BIN" \
             -addr 127.0.0.1:8001 \
             -cache /mnt/us/kindle-manga-cache \
             -history "$DIR/history.json" \
             -ready "$SRV_READY" \
+            -cache-max-mb "$CACHE_MB" \
             >>"$SRV_LOG" 2>&1 &
         SRV_PID=$!
         echo "server pid=$SRV_PID log=$SRV_LOG"

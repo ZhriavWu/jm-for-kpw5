@@ -37,7 +37,7 @@
 
 set -uo pipefail
 
-PROJ=${PROJ:-$(cd "$(dirname "$0")" && pwd)}
+PROJ=${PROJ:-$(cd "$(dirname "$0")/.." && pwd)}
 . "$HOME/.cargo/env" 2>/dev/null || true
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/root/target/kindle-manga}
 

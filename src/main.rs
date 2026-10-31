@@ -54,7 +54,9 @@ mod screensaver;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
+use std::sync::Arc;
 
 use render::{PixelBuffer, THUMB_MAX};
 
@@ -329,6 +331,52 @@ const REFRESH_FILE: &str = "refresh.txt";
 /// 位置同 `server.txt`。规格 4.9 要求「点过知道了永不再现」。
 const HINT_FILE: &str = "reader_hint_seen.txt";
 
+/// 磁盘缓存上限，单位 MB。`0` = 不限制。
+///
+/// 内容是一个十进制数字，放程序目录（和 `refresh.txt` 同一套路）。
+///
+/// ⚠️ **这个文件有两个读者**：
+///   1. `launch.sh` 在启动服务端前读它，作为 `-cache-max-mb` 传进去；
+///   2. 客户端自己读它显示设置项，并在连上服务端后推给服务端
+///      （`POST /api/cache`）—— 因为 launch.sh 只在启动那一刻读一次，
+///      用户运行中改了值，只能靠这条接口同步给已经跑着的进程。
+const CACHE_LIMIT_FILE: &str = "cache_limit.txt";
+
+/// 缓存上限的默认值：**1 GB**。
+const CACHE_LIMIT_DEFAULT_MB: u32 = 1024;
+
+/// 加载圈一共几格。和 `ui/chrome.slint` 里 `SpinRing` 的 12 个点**必须一致**
+/// （只影响手感，不一致也不会出错，但会看着卡一下）。
+const SPIN_STEPS: u32 = 12;
+
+/// 加载圈每转一格之间隔多久（毫秒）。
+///
+/// ⚠️ 这是**离散步进**，不是动画。连续旋转在墨水屏上会拖一串残影，
+/// 而且 `check-ui-spec.sh` 第 2 条也禁止 `Timer` / `animate`。
+///
+/// **250ms × 12 格 = 3 秒转一圈**，和用户给的设计稿
+/// （`animation: spin 3s linear infinite`）一致。
+/// 再快（<180ms）每格都要等一次局部刷新落地，反而看着一顿一顿。
+const SPIN_INTERVAL_MS: u64 = 250;
+
+/// 「缓存上限」那一行点一下会按这个顺序轮换。
+///
+/// 做成轮换而不是弹数字键盘：只有四档，点一下直接看到下一个值，
+/// 比「弹键盘 → 输入 → 确定」少两次跳屏（墨水屏每跳一次等 1~3 秒）。
+/// `0` 放最后：它是最激进的选择，不该被误触到。
+const CACHE_LIMIT_CYCLE: [u32; 4] = [512, 1024, 2048, 0];
+
+/// 给用户看的缓存上限文字。
+fn cache_limit_text(mb: u32) -> String {
+    if mb == 0 {
+        "不限制".to_string()
+    } else if mb >= 1024 {
+        format!("{} GB", mb / 1024)
+    } else {
+        format!("{mb} MB")
+    }
+}
+
 /// 主页 / 设置·关于页显示的作者名。
 ///
 /// ⚠️ 别改回占位符。设计规格里这一项标着「待填」，
@@ -405,6 +453,24 @@ fn saved_refresh_interval() -> Option<u32> {
 fn save_refresh_interval(interval: u32) -> Result<(), String> {
     let path = config_path_named(REFRESH_FILE).ok_or("找不到程序所在目录")?;
     std::fs::write(&path, interval.to_string())
+        .map_err(|e| format!("写入 {} 失败：{e}", path.display()))
+}
+
+/// 读用户设的缓存上限（MB）。读不出来就用默认 1 GB。
+///
+/// 超过 64 GB 的值一律当没写 —— 那多半是文件被改坏了，
+/// 而「上限 4 TB」等于不限制，跟用户的意图正好相反。
+fn saved_cache_limit_mb() -> u32 {
+    std::fs::read_to_string(config_path_named(CACHE_LIMIT_FILE).unwrap_or_default())
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .filter(|v| *v <= 65536)
+        .unwrap_or(CACHE_LIMIT_DEFAULT_MB)
+}
+
+fn save_cache_limit_mb(mb: u32) -> Result<(), String> {
+    let path = config_path_named(CACHE_LIMIT_FILE).ok_or("找不到程序所在目录")?;
+    std::fs::write(&path, mb.to_string())
         .map_err(|e| format!("写入 {} 失败：{e}", path.display()))
 }
 
@@ -797,8 +863,14 @@ struct View {
     refresh_label: String,
     /// 这台设备有没有电子墨水屏。桌面预览是 false，界面上要藏掉这一项。
     refresh_available: bool,
-    /// 「下载缓存」行右边
-    cache_label: String,
+    /// 「缓存上限」行右边，如「1 GB」
+    cache_limit_label: String,
+    /// 「已用空间」行右边，如「已用 312 MB / 上限 1 GB」
+    cache_used_label: String,
+    /// 加载圈转到第几格（0..SPIN_STEPS）
+    spin_phase: i32,
+    /// 要不要画加载圈（= 正在加载）。由 Rust 算好，UI 不用再拼条件。
+    spin_shown: bool,
     version_label: String,
     device_label: String,
     server_label: String,
@@ -887,6 +959,12 @@ enum Cmd {
     RecentPicked(usize),
     /// 清空最近搜索
     RecentClear,
+    /// 设置页「缓存上限」点一下 → 轮到下一档，并推给服务端
+    CycleCacheLimit,
+    /// 服务端缓存用量查回来了（后台线程）
+    CacheStatsDone(Result<api::CacheStats, api::ApiError>),
+    /// 加载圈的下一格（后台轮询线程发回来的）
+    SpinTick,
     /// 换排序方式（下标指 `sort_options`），换完重搜一次
     SetSort(usize),
 
@@ -1282,6 +1360,19 @@ struct Worker {
     /// 每帧都改会把它的计数器清零，永远攒不到触发条件。
     refresh_active: Option<bool>,
 
+    // 缓存上限
+    /// 用户设的磁盘缓存上限（MB）。0 = 不限制。
+    /// 启动时从 `cache_limit.txt` 读；改的时候写回，并推给服务端。
+    cache_limit_mb: u32,
+    /// 服务端报回来的用量（`GET /api/cache`）。没连上 / 还没查到就是 None。
+    cache_stats: Option<api::CacheStats>,
+
+    // 加载圈
+    /// 当前转到第几格（0..SPIN_STEPS）。
+    spin_phase: u32,
+    /// 驱动加载圈的线程开关：`Some` = 正在转。置 false 后那个线程会自己退出。
+    spin_alive: Option<Arc<AtomicBool>>,
+
     // 搜索
     keyword: String,
     /// 最近搜索关键词（本地文件）。搜索页空态时铺在结果区上。
@@ -1444,6 +1535,10 @@ impl Worker {
             refresh,
             full_refresh,
             refresh_active: None,
+            cache_limit_mb: saved_cache_limit_mb(),
+            cache_stats: None,
+            spin_phase: 0,
+            spin_alive: None,
             keyword: String::new(),
             recent: recent::Recent::local(recent_path()),
             // 服务端的 DEFAULT_SORT，连上后会用 /api/info 的值覆盖
@@ -1544,11 +1639,19 @@ impl Worker {
             set_conn: self.set_conn(),
             refresh_label: self.refresh_label(),
             refresh_available: self.refresh.available(),
-            cache_label: format!(
-                "已缓存 {} 封面 / {} 页原图",
-                self.covers.len(),
-                self.raw_cache.len()
-            ),
+            cache_limit_label: format!("{}　点此修改", cache_limit_text(self.cache_limit_mb)),
+            cache_used_label: match self.cache_stats.as_ref() {
+                Some(st) => format!("{}　点此清空", st.describe()),
+                // 还没连上服务端 / 还没查到时，把内存里的缓存数报出来，
+                // 至少不是一片空白。
+                None => format!(
+                    "内存中 {} 封面 / {} 页",
+                    self.covers.len(),
+                    self.raw_cache.len()
+                ),
+            },
+            spin_phase: (self.spin_phase % SPIN_STEPS) as i32,
+            spin_shown: self.loading,
             version_label: env!("CARGO_PKG_VERSION").to_string(),
             device_label: self.platform.clone(),
             server_label: self
@@ -1773,6 +1876,84 @@ impl Worker {
         self.input.pop();
     }
 
+    /// 把当前的缓存上限推给服务端（`POST /api/cache`），顺便刷新用量。
+    ///
+    /// 为什么要推：`launch.sh` 只在启动服务端那一刻读 `cache_limit.txt`。
+    /// 用户运行中在设置里改了值，已经跑着的进程并不知道 —— 必须走这条接口。
+    fn push_cache_limit(&mut self) {
+        let Some(base) = self.base.clone() else {
+            self.emit();
+            return;
+        };
+        let mb = self.cache_limit_mb;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            // 设完再查一次，服务端会带回清理后的真实用量
+            let got = api::set_cache_limit(&base, mb).or_else(|e| {
+                log::warn!("推送缓存上限失败：{e}");
+                Err(e)
+            });
+            let _ = tx.send(Cmd::CacheStatsDone(got));
+        });
+        self.emit();
+    }
+
+    /// 清空服务端磁盘缓存（后台线程，回来走 `CacheStatsDone`）。
+    fn clear_disk_cache(&mut self) {
+        let Some(base) = self.base.clone() else {
+            self.say("已清除内存缓存（服务端未连接）");
+            self.emit();
+            return;
+        };
+        self.say("正在清空磁盘缓存…");
+        self.emit();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let got = api::clear_cache(&base);
+            let _ = tx.send(Cmd::CacheStatsDone(got));
+        });
+    }
+
+    /// 查一次服务端缓存用量（打开设置页时调）。
+    fn fetch_cache_stats(&mut self) {
+        let Some(base) = self.base.clone() else {
+            return;
+        };
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let got = api::cache_stats(&base);
+            let _ = tx.send(Cmd::CacheStatsDone(got));
+        });
+    }
+
+    /// 让加载圈跟着 `loading` 转 / 停。
+    ///
+    /// 由 [`emit`](Self::emit) 调用 —— 它是唯一的状态出口，放在这儿就不会出现
+    /// 「某条路径把 loading 关了，圈还在转」那种漏网。
+    fn sync_spin(&mut self) {
+        if self.loading {
+            if self.spin_alive.is_some() {
+                return;
+            }
+            let alive = Arc::new(AtomicBool::new(true));
+            self.spin_alive = Some(alive.clone());
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                while alive.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(SPIN_INTERVAL_MS));
+                    if !alive.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if tx.send(Cmd::SpinTick).is_err() {
+                        break; // worker 已经没了（程序在关）
+                    }
+                }
+            });
+        } else if let Some(a) = self.spin_alive.take() {
+            a.store(false, Ordering::Relaxed);
+        }
+    }
+
     /// 加载区那六个方块填几个。
     ///
     /// 只有**阅读器里翻页**这件事有可量化的进度（读到第几页 / 共几页）；
@@ -1877,6 +2058,10 @@ impl Worker {
         // 值得用整屏闪一下去换干净。而首页/设置/搜索这些是白底黑字的小界面，
         // 本来就不容易攒残影，闪那一下纯粹是打扰。
         self.sync_refresh_policy();
+
+        // 加载圈跟着 loading 起停。放在 emit 里是因为它是唯一的状态出口 ——
+        // 分散到各个「把 loading 关掉」的地方迟早会漏一个。
+        self.sync_spin();
 
         // 界面或状态一变就打一行日志。
         // 串口日志是这台设备上唯一能从外面看到「屏幕现在是什么」的通道 ——
@@ -2046,7 +2231,10 @@ impl Worker {
                 4 => {
                     self.nav_return = self.screen;
                     self.screen = Screen::Settings;
+                    // 进设置页顺手查一次磁盘用量 —— 这个值只有服务端知道。
+                    // 异步查，不挡着界面先出来。
                     self.emit();
+                    self.fetch_cache_stats();
                 }
                 _ => {}
             },
@@ -2113,10 +2301,12 @@ impl Worker {
                 self.boot();
             }
             Cmd::SetClearCache => {
+                // 内存里的封面 / 原图缓存
                 self.covers.clear();
                 self.raw_cache.clear();
-                self.say("已清除封面与原图缓存");
-                self.emit();
+                // 磁盘上的也要清 —— 用户点「已用空间」那一行，期望的是
+                // 磁盘真的空出来，而不只是内存里的几张缩略图。
+                self.clear_disk_cache();
             }
             Cmd::PageLeft => {
                 if self.screen == Screen::SettingsAbout {
@@ -2156,6 +2346,44 @@ impl Worker {
             Cmd::RecentClear => {
                 self.recent.clear();
                 self.say("已清空最近搜索");
+                self.emit();
+            }
+            Cmd::CycleCacheLimit => {
+                // 在当前档位上往后挪一格。当前值不在候选表里（用户手改过文件）
+                // 就从第一档开始。
+                let cur = self.cache_limit_mb;
+                let next = match CACHE_LIMIT_CYCLE.iter().position(|v| *v == cur) {
+                    Some(i) => CACHE_LIMIT_CYCLE[(i + 1) % CACHE_LIMIT_CYCLE.len()],
+                    None => CACHE_LIMIT_CYCLE[0],
+                };
+                self.cache_limit_mb = next;
+                if let Err(e) = save_cache_limit_mb(next) {
+                    log::warn!("保存缓存上限失败：{e}");
+                }
+                log::info!("缓存上限改为 {}", cache_limit_text(next));
+                self.say(format!("缓存上限：{}", cache_limit_text(next)));
+                // 立刻推给服务端（服务端会按新上限清理一次）
+                self.push_cache_limit();
+            }
+            Cmd::CacheStatsDone(got) => {
+                match got {
+                    Ok(st) => {
+                        self.say(format!("缓存 {}", st.describe()));
+                        self.cache_stats = Some(st);
+                    }
+                    Err(e) => {
+                        self.say(format!("查缓存用量失败：{e}"));
+                    }
+                }
+                self.emit();
+            }
+            Cmd::SpinTick => {
+                // 不在加载就什么都不做 —— 也别 emit，否则空闲时每 320ms
+                // 白白重画一次，墨水屏上就是白闪。
+                if !self.loading {
+                    return;
+                }
+                self.spin_phase = (self.spin_phase + 1) % SPIN_STEPS;
                 self.emit();
             }
             Cmd::SetSort(i) => {
@@ -2450,6 +2678,11 @@ impl Worker {
         );
         self.base = Some(base.clone());
         self.say(format!("已连接 {base}  ·  服务端 v{}", info.version));
+
+        // 把本地的缓存上限推给服务端。launch.sh 只在启动那一刻读
+        // `cache_limit.txt`，用户运行中改过值的话，进程里还是旧值。
+        self.push_cache_limit();
+
         // 首屏是**历史记录**（规格定的），连上就把它拉出来铺上
         self.screen = Screen::History;
         self.open_history();
@@ -4396,7 +4629,10 @@ fn apply_view(app: &AppWindow, v: &View) {
     app.set_set_conn(v.set_conn.clone().into());
     app.set_refresh_label(v.refresh_label.clone().into());
     app.set_refresh_available(v.refresh_available);
-    app.set_cache_label(v.cache_label.clone().into());
+    app.set_cache_limit_label(v.cache_limit_label.clone().into());
+    app.set_cache_used_label(v.cache_used_label.clone().into());
+    app.set_spin_phase(v.spin_phase);
+    app.set_spin_shown(v.spin_shown);
     app.set_version_label(v.version_label.clone().into());
     app.set_device_label(v.device_label.clone().into());
     app.set_server_label(v.server_label.clone().into());
@@ -6376,6 +6612,7 @@ fn main() {
         });
     }
     wire!(on_recent_clear, Cmd::RecentClear);
+    wire!(on_set_cycle_cache_limit, Cmd::CycleCacheLimit);
     {
         let tx = tx.clone();
         app.on_fav_tab_picked(move |i| {

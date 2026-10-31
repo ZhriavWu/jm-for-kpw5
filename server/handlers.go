@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -456,6 +457,70 @@ func (s *Server) handleCover(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	_, _ = w.Write(data)
+}
+
+// ---------------------------------------------------------------- 缓存
+
+// handleCache 管理磁盘缓存的上限与内容。
+//
+//	GET  /api/cache                  → 用量统计
+//	POST /api/cache {max_mb: 1024}   → 改上限（0 = 不限制），**立刻**清理
+//	POST /api/cache {clear: true}    → 清空
+//
+// 客户端在设置页里改「缓存上限」时调它；启动连上服务端时也会推一次，
+// 保证 `cache_limit.txt` 里的值和进程里的值一致（launch.sh 只在启动那一刻
+// 读那个文件，用户运行中改了的话必须靠这条接口同步）。
+func (s *Server) handleCache(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		st := s.cache.Stats()
+		writeJSON(w, 200, map[string]any{
+			"ok":         true,
+			"used_bytes": st.UsedBytes,
+			"used_mb":    st.UsedMB,
+			"limit_mb":   st.LimitMB,
+			"files":      st.Files,
+		})
+
+	case http.MethodPost:
+		var body struct {
+			MaxMB *int64 `json:"max_mb"`
+			Clear bool   `json:"clear"`
+		}
+		data, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		if len(data) > 0 {
+			if err := json.Unmarshal(data, &body); err != nil {
+				apiError(w, 400, "请求体不是合法 JSON")
+				return
+			}
+		}
+
+		var st Stats
+		var err error
+		if body.Clear {
+			st, err = s.cache.Clear()
+			if err != nil {
+				log.Printf("清空缓存时出错：%v", err)
+			}
+		}
+		if body.MaxMB != nil {
+			st = s.cache.SetMaxMB(*body.MaxMB)
+		}
+		if !body.Clear && body.MaxMB == nil {
+			st = s.cache.Stats()
+		}
+
+		writeJSON(w, 200, map[string]any{
+			"ok":         true,
+			"used_bytes": st.UsedBytes,
+			"used_mb":    st.UsedMB,
+			"limit_mb":   st.LimitMB,
+			"files":      st.Files,
+		})
+
+	default:
+		apiError(w, 405, "不支持的方法")
+	}
 }
 
 // ---------------------------------------------------------------- 观看记录
