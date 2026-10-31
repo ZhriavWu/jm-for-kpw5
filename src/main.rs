@@ -1169,33 +1169,42 @@ struct DecodedPage {
     long: bool,
 }
 
-/// 把已经解出来的图裁成「能直接上屏的画布」。
+/// 把已经解出来的**全分辨率**图裁成「能直接上屏的画布」。
 ///
 /// 纯计算，不碰网络 —— 本地模式和网络模式共用这一段，区别只在字节哪来的。
+///
+/// ⚠️ 传进来的必须是全分辨率（`render::decode_full` 的输出），**不能是缩过的**。
+///    解密要在全分辨率下做，否则每一块的分界处会留下横向细线 ——
+///    详细原因和实测数据见 `descramble.rs` 的文件头。
 fn finish_decode(
-    buf: PixelBuffer,
+    full: render::FullImage,
     raw: Vec<u8>,
     fit: render::FitMode,
     seg: u32,
-    orig_h: u32,
 ) -> DecodedPage {
-    // ---- 禁漫横条重排解密 ----
-    //
-    // ⚠️ 必须在**缩放/切屏之前**做：分段边界是按原图高度算的。
-    //    `orig_h` 是解码前的真实高度，解码阶段被降采样过时靠它做比例映射。
-    //
-    // seg <= 1 = 不用解密：旧服务端发的是已解密的图，这条路径保证兼容。
-    let buf = if seg > 1 {
-        descramble::descramble_scaled(&buf, seg, orig_h)
-    } else {
-        buf
-    };
+    // 长条漫的判定只用比例，和缩放无关，先算出来（后面挑预算要用）。
+    let long = full.w > 0 && full.h as f32 / full.w as f32 > render::LONG_STRIP_RATIO;
+    let (tw, th) = render::plan_size(full.w, full.h, long);
 
-    let long = render::is_long_strip(&buf);
     // 缩放是这里最贵的一步（Kindle 的 CPU 比电脑慢不少）。慢的时候记一行，
     // 正常情况下不刷屏 —— 有了这个数字才知道要不要再优化。
     let t0 = std::time::Instant::now();
-    let (src_w, src_h) = (buf.width(), buf.height()); // buf 稍后被 move 进 DecodedPage
+    let (src_w, src_h) = (full.w, full.h);
+
+    // ---- 解密 + 缩放 ----
+    //
+    // seg > 1：按块拼接，**每块单独缩**（块与块之间不混合，所以没有接缝）。
+    // seg <= 1：不加密（旧版 Python 服务端发的是已解密图），直接整体缩。
+    let buf = if seg > 1 {
+        descramble::descramble_resize(&full, seg, tw, th)
+    } else {
+        render::shrink_to(&full, tw, th)
+    };
+    // 全分辨率那份到这儿就没用了。**显式丢掉** —— 它可能有几十 MB
+    // （2150×7516 就是 64.6 MB），留着会顶到下一页解码时的峰值。
+    drop(full);
+
+    let long = render::is_long_strip(&buf);
     let (strip, strip_step, strip_y, display) = if long {
         // 长条漫：留住整条（后面滚动要用它反复裁），显示第一屏。
         // 它只按宽度适配 + 纵向切片，不参与「竖边/横边」那套切换 ——
@@ -1237,8 +1246,8 @@ fn finish_decode(
 ///
 /// 本地图（`--demo` / `--dir`）不是从禁漫源站来的，**没有加密**，所以 seg 恒 0。
 fn decode_page(bytes: Vec<u8>, fit: render::FitMode) -> Result<DecodedPage, String> {
-    let d = render::decode_meta(&bytes).map_err(|e| format!("解码失败：{e}"))?;
-    Ok(finish_decode(d.buf, bytes, fit, 0, d.orig_h))
+    let full = render::decode_full(&bytes)?;
+    Ok(finish_decode(full, bytes, fit, 0))
 }
 
 /// 网络模式用：**取一页原图 → 解码 → 裁屏，整个跑在后台线程上。**
@@ -1268,18 +1277,24 @@ fn fetch_and_decode_page(
     //
     // ⚠️ 走兜底时**照样要解密**：服务端转码只是换了容器，横条顺序没动，
     //    seg 原样传进去。
-    let first_err = match render::decode_meta(&bytes) {
-        Ok(d) => return Ok(finish_decode(d.buf, bytes, fit, seg, d.orig_h)),
+    let first_err = match render::decode_full(&bytes) {
+        Ok(full) => return Ok(finish_decode(full, bytes, fit, seg)),
         Err(e) => e,
     };
     if !jpeg_url.is_empty() {
         if let Some(jb) = api::fetch_bytes(base, jpeg_url).ok().flatten() {
-            if let Ok(d) = render::decode_meta(&jb) {
-                return Ok(finish_decode(d.buf, jb, fit, seg, d.orig_h));
+            if let Ok(full) = render::decode_full(&jb) {
+                return Ok(finish_decode(full, jb, fit, seg));
             }
         }
     }
-    Err(format!("解码失败：{first_err}"))
+    // 「图太大」这种错误原样透传 —— 它本身就是给用户看的说明，
+    // 前面再套一层「解码失败：」反而啰嗦。
+    if first_err.contains("太大") {
+        Err(first_err)
+    } else {
+        Err(format!("解码失败：{first_err}"))
+    }
 }
 
 // ---------------------------------------------------------------- Worker
@@ -1976,6 +1991,20 @@ impl Worker {
     /// 只用这两组，不加「作品」—— 三个组会占满 3 行的预算，标签就只剩 1 行，
     /// 12 个标签的常见本子会被截掉一大半。作品名基本已经写在标题里了。
     fn apply_album_tags(&mut self, a: &api::Album) {
+        // 两个都为 0 说明服务端版本太旧（/api/album 里没有 actors 字段），
+        // 而不是这一本恰好没角色 —— 这种情况在日志里留一句，免得下次又说
+        // 「角色标签没显示」却查不出是部署漏了服务端。
+        log::info!(
+            "详情页标签：角色 {} 个，标签 {} 个{}",
+            a.actors.len(),
+            a.tags.len(),
+            if a.actors.is_empty() && !a.tags.is_empty() {
+                "（没有角色 —— 检查服务端是否为旧版：新版 /api/album 会返回 actors）"
+            } else {
+                ""
+            }
+        );
+
         let groups: Vec<TagGroup> = vec![("角色", &a.actors), ("标签", &a.tags)];
         let (chips, headers) = layout_tag_groups(&groups);
 
@@ -5119,20 +5148,12 @@ mod seg_tests {
             sum as f64 / ((y1 - y0) * w) as f64
         };
 
-        let fixed = finish_decode(
-            scrambled.clone(),
-            Vec::new(),
-            render::FitMode::FitHeight,
-            NUM,
-            H,
-        );
-        let loose = finish_decode(
-            scrambled,
-            Vec::new(),
-            render::FitMode::FitHeight,
-            0,
-            H,
-        );
+        let as_full = |b: &PixelBuffer| {
+            render::FullImage::from_rgba(b.as_bytes().to_vec(), b.width(), b.height())
+        };
+
+        let fixed = finish_decode(as_full(&scrambled), Vec::new(), render::FitMode::FitHeight, NUM);
+        let loose = finish_decode(as_full(&scrambled), Vec::new(), render::FitMode::FitHeight, 0);
 
         let h = fixed.display.height() as usize;
         let top = avg(&fixed, 0, 100);

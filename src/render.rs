@@ -29,6 +29,9 @@
 //! 阅读器为什么这么在意「一屏到底是多少像素」：长条漫要由客户端自己按屏裁剪，
 //! 裁多了会出现半截图，裁少了会重复。所以 VIEW_H 必须是真的可视高度。
 
+// `FilterType` 只在那几个「一次性对照」测试里用（和 `image` crate 比质量/速度），
+// 主流程的重采样是自己写的（见文件后面的 `resample`）。
+#[cfg(test)]
 use image::imageops::FilterType;
 
 /// 面板宽度，来自 PW5 实测规格。
@@ -73,6 +76,27 @@ const MAX_PIXELS: u64 = 2_500_000;
 /// 一条 1236×20000 的图会被缩到 386 宽，放到 1236 宽的屏上会糊得没法看。
 /// 8 M 像素 ≈ 32 MB RGBA，是这台机器能舒服承受的量级。
 const MAX_PIXELS_LONG: u64 = 8_000_000;
+
+/// **解码**阶段的硬上限：超过这个像素数直接拒绝，不解码。
+///
+/// 这个值管的是「内存能不能撑住解码」，与上面的显示预算无关。
+///
+/// 真机实测（2026-10-31 崩溃）：
+///
+/// ```text
+/// memory allocation of 64637600 bytes failed
+/// Aborted → exit code: 134
+/// ```
+///
+/// 64,637,600 / 4 = **16,159,400 像素 = 2150 × 7516**（一张长条页）。
+/// `image-webp` 解码时会先按原尺寸申请一整块 RGBA，而
+/// `image` 的 `Limits.max_alloc` 对 webp 解码器**不生效**
+/// （`image-webp 0.2.4` 里没有任何 max_alloc 检查），所以必须在解码前自己拦。
+///
+/// 24 M 像素 ≈ 96 MB RGBA。实测缓存里最大的普通页是 6.53 M 像素
+/// （2150×3035），长条页 16.16 M —— 24 M 留了约 1.5 倍余量，
+/// 再大的基本是扫描事故，拒绝比崩溃好。
+const DECODE_HARD_LIMIT: u64 = 24_000_000;
 
 /// 列表行里那个小封面框的尺寸上限（表格里的参考值）。
 ///
@@ -147,59 +171,149 @@ impl Default for FitMode {
 
 /// 解码结果：像素 + **缩放前**的原始尺寸。
 ///
-/// 带上原始高度是为了禁漫的「横条重排」解密：分段边界是按原图高度算的
-/// （`h % num`），如果解码时已经降过采样，必须用原高度做比例映射，
-/// 否则拼接处会出现 1~2 行的错位缝。
-pub struct Decoded {
-    pub buf: PixelBuffer,
-    /// 缩放前的原始宽度。目前只有测试用得到（解密只用高度），
-    /// 留着是为了「原始尺寸」这个概念完整，别再被拉去当别的用途。
-    #[allow(dead_code)]
-    pub orig_w: u32,
-    /// 缩放前的原始高度。禁漫解密靠它做分段边界的比例映射。
-    pub orig_h: u32,
+/// 解码出来的一整张**全分辨率**图（RGBA8）。
+///
+/// 为什么不用 `PixelBuffer`：那个类型在构造时一定会**拷贝**一份
+/// （`SharedPixelBuffer::clone_from_slice` 只接受借用的切片）。
+/// 一张 2150×7516 的图解出来就是 64.6 MB，再拷一份峰值直接翻倍 ——
+/// 真机上就是这么 OOM 崩掉的。这里先用普通 `Vec<u8>` 装着，
+/// 等缩到目标尺寸（≪ 原图）再转成 `PixelBuffer`。
+pub struct FullImage {
+    pub w: u32,
+    pub h: u32,
+    pub data: Vec<u8>,
 }
 
-/// 解码一张图（并带出原始尺寸）。
+impl FullImage {
+    /// 从任意 RGBA 缓冲造一个。
+    ///
+    /// 运行时用的是 [`decode_full`]，这个只在单元测试里用（造夹具）。
+    #[allow(dead_code)]
+    pub fn from_rgba(data: Vec<u8>, w: u32, h: u32) -> Self {
+        Self { w, h, data }
+    }
+}
+
+/// 解码一张图的**全分辨率**版本，不做任何缩放。
 ///
-/// 中间那步降采样是给长条漫准备的：`image` crate 会把整张图先解出来，
-/// 所以峰值内存仍然等于原图大小（这点躲不掉，除非换成流式解码器），
-/// 但**留下来的**那份被压到预算内，翻页时不会因为同时驻留几张巨图而爆内存。
+/// ⚠️ 以前的版本在这里就地降采样了。那是错的 —— 见 `descramble.rs` 顶部的
+///    「为什么必须先解密再缩放」：先缩再解密会在每一块分界处留下横线。
+///    缩放挪到 `shrink_to` / `descramble::descramble_resize` 里做。
 ///
-/// 预算分两档：普通页 2.5 M，长条漫 8 M（理由见两个常量的注释）。
-pub fn decode_meta(bytes: &[u8]) -> Result<Decoded, String> {
+/// ⚠️ 这里**多便宜就多便宜**：`into_rgba8()` 而不是 `to_rgba8()`。
+///    后者会克隆一份（`to_rgba8(&self)`），而解码结果本来就是 RGBA8，
+///    克隆纯属白烧一份全图大小的内存。
+pub fn decode_full(bytes: &[u8]) -> Result<FullImage, String> {
+    // 先只读文件头量尺寸：超大图直接拒绝，别等解码时才 OOM。
+    //
+    // `image` crate 的 `Limits.max_alloc` 对 webp 解码器**不生效**
+    // （实测 `image-webp 0.2.4` 里没有任何 max_alloc 检查），
+    // 所以只能自己先量。
+    let sniffed = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("解码失败: {e}"))?
+        .into_dimensions()
+        .map_err(|e| format!("解码失败: {e}"))?;
+
+    if let Some(msg) = oversize_message(sniffed.0, sniffed.1) {
+        return Err(msg);
+    }
+
     let img = image::load_from_memory(bytes).map_err(|e| format!("解码失败: {e}"))?;
+    let rgba = img.into_rgba8();
+    let (w, h) = rgba.dimensions();
 
-    let (w, h) = (img.width(), img.height());
-    let (orig_w, orig_h) = (w, h);
-    let pixels = w as u64 * h as u64;
-    let is_long = w > 0 && h as f32 / w as f32 > LONG_STRIP_RATIO;
-    let budget = if is_long { MAX_PIXELS_LONG } else { MAX_PIXELS };
-
-    let img = if pixels > budget {
-        let k = (budget as f64 / pixels as f64).sqrt();
-        let nw = ((w as f64 * k).round() as u32).max(1);
-        let nh = ((h as f64 * k).round() as u32).max(1);
-        img.resize(nw, nh, FilterType::Triangle)
-    } else {
-        img
-    };
-
-    let rgba = img.to_rgba8();
-    Ok(Decoded {
-        buf: PixelBuffer::clone_from_slice(rgba.as_raw(), rgba.width(), rgba.height()),
-        orig_w,
-        orig_h,
+    Ok(FullImage {
+        w,
+        h,
+        data: rgba.into_raw(),
     })
 }
 
-/// 只要像素、不要原始尺寸时的简写。
+/// 尺寸超过解码硬上限时，返回一句给用户看的话；没超就是 `None`。
 ///
-/// ⚠️ 主流程现在都走 [`decode_meta`]（解密需要原始高度）。保留这个包装
-///    是为了屏保/测试这类「不在乎原图尺寸」的调用，别删。
+/// 抽成纯函数是为了能用测试钉住 —— 造一张真的 4000×7000 图片来测太慢
+/// （光编码就要上百 MB 内存），而这条判断本身只依赖两个数字。
+fn oversize_message(w: u32, h: u32) -> Option<String> {
+    let px = w as u64 * h as u64;
+    if px <= DECODE_HARD_LIMIT {
+        return None;
+    }
+    Some(format!(
+        "这一页太大了（{}×{}，{:.1} 兆像素），Kindle 内存放不下",
+        w,
+        h,
+        px as f64 / 1e6
+    ))
+}
+
+/// 目标尺寸：把 `w × h` 压到预算以内（**只缩不放**）。
+///
+/// 长条漫先按**宽度**收到 `VIEW_W` —— 屏幕就 1236 宽，再宽纯属浪费内存，
+/// 而且原来的 8 M 面积预算对「2150×7516」这种图放得太松。
+pub fn plan_size(w: u32, h: u32, long: bool) -> (u32, u32) {
+    if w == 0 || h == 0 {
+        return (1, 1);
+    }
+    let (mut tw, mut th) = (w as f64, h as f64);
+
+    if long && tw > VIEW_W as f64 {
+        th *= VIEW_W as f64 / tw;
+        tw = VIEW_W as f64;
+    }
+
+    let budget = if long { MAX_PIXELS_LONG } else { MAX_PIXELS };
+    let px = tw * th;
+    if px > budget as f64 {
+        let k = (budget as f64 / px).sqrt();
+        tw *= k;
+        th *= k;
+    }
+
+    let out_w = (tw.round() as u32).max(1);
+    let mut out_h = (th.round() as u32).max(1);
+
+    // 四舍五入可能让乘积比预算多一点点（实测 2150×3035 会得到
+    // 1331×1879 = 2,500,949，超了 949 个像素）。少几行就行 ——
+    // **别去动宽度**，宽度决定清晰度。
+    while out_w as u64 * out_h as u64 > budget && out_h > 1 {
+        out_h -= 1;
+    }
+    (out_w, out_h)
+}
+
+/// 把全分辨率图缩到目标尺寸（**不重排**，给未加密的图用）。
+pub fn shrink_to(src: &FullImage, dst_w: u32, dst_h: u32) -> PixelBuffer {
+    let (dw, dh) = (dst_w.max(1) as usize, dst_h.max(1) as usize);
+
+    // 空图（解码失败、或者测试里的 0×0）直接给一张白画布 ——
+    // 重采样器假定源至少 1×1，喂空数组会越界。
+    if src.w == 0 || src.h == 0 || src.data.len() < src.w as usize * src.h as usize * 4 {
+        let mut buf = PixelBuffer::new(dw as u32, dh as u32);
+        buf.make_mut_bytes().fill(0xff);
+        return buf;
+    }
+
+    let mut buf = PixelBuffer::new(dw as u32, dh as u32);
+    resample_mapped_into(
+        buf.make_mut_bytes(),
+        &src.data,
+        src.w as usize,
+        src.h as usize,
+        dw,
+        dh,
+        |y| y,
+    );
+    buf
+}
+
+/// 只要像素、不要全分辨率时的简写（**会缩小**，供屏保这类调用用）。
 #[allow(dead_code)]
 pub fn decode(bytes: &[u8]) -> Result<PixelBuffer, String> {
-    decode_meta(bytes).map(|d| d.buf)
+    let full = decode_full(bytes)?;
+    let long = full.w > 0 && full.h as f32 / full.w as f32 > LONG_STRIP_RATIO;
+    let (tw, th) = plan_size(full.w, full.h, long);
+    Ok(shrink_to(&full, tw, th))
 }
 
 /// 解码成缩略图（保持比例，只缩不放）。
@@ -551,10 +665,47 @@ fn to_u8(acc: u32) -> u8 {
 /// **8.4 MB**，写一遍再读一遍，光内存带宽就吃掉一半时间。合起来之后
 /// 每处理一个输出像素直接对 `横 taps × 竖 taps` 个源像素求和
 /// （缩放 0.9 时通常就是 2~4 个），比两趟的 2.2 次取样还少。
-fn resample(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
+pub(crate) fn resample(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
+    resample_mapped(src, sw, sh, dw, dh, |y| y)
+}
+
+/// 同 [`resample`]，但取样前把**源行号**过一遍 `map_row`。
+///
+/// 用途只有一个：禁漫解密。它重排的是整行，所以在重采样的同一个循环里把
+/// 源行号映射过去，就等于「先把整张图重排、再整体缩放」—— **逐像素完全一致**，
+/// 但不需要真的物化那张重排后的全分辨率图（那会多占一整份内存）。
+///
+/// ⚠️ `map_row` 必须对每个输入都返回合法行号（< sh）。
+pub(crate) fn resample_mapped(
+    src: &[u8],
+    sw: usize,
+    sh: usize,
+    dw: usize,
+    dh: usize,
+    map_row: impl Fn(usize) -> usize,
+) -> Vec<u8> {
+    let mut out = vec![0u8; dw * dh * 4];
+    resample_mapped_into(&mut out, src, sw, sh, dw, dh, map_row);
+    out
+}
+
+/// 同 [`resample_mapped`]，但**直接写进调用方给的缓冲**。
+///
+/// 省掉一次「重采样结果 → PixelBuffer」的整幅拷贝：目标尺寸那份在真机上
+/// 也有 10~20 MB，翻页时正是内存最紧的时刻。
+///
+/// `out` 必须是 `dw * dh * 4` 字节。
+pub(crate) fn resample_mapped_into(
+    out: &mut [u8],
+    src: &[u8],
+    sw: usize,
+    sh: usize,
+    dw: usize,
+    dh: usize,
+    map_row: impl Fn(usize) -> usize,
+) {
     let tx = Taps::for_scale(sw, dw);
     let ty = Taps::for_scale(sh, dh);
-    let mut out = vec![0u8; dw * dh * 4];
     let src_row_bytes = sw * 4;
 
     for dy in 0..dh {
@@ -571,7 +722,7 @@ fn resample(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
             let xwgt = &tx.weights[xs..xe];
             for ky in ys..ye {
                 let wy = ty.weights[ky];
-                let srow = ty.indices[ky] as usize * src_row_bytes;
+                let srow = map_row(ty.indices[ky] as usize).min(sh.saturating_sub(1)) * src_row_bytes;
                 for (&ix, &wx) in xidx.iter().zip(xwgt) {
                     let so = srow + ix as usize * 4;
                     let w = wy * wx; // ≤ (1<<20)，不会溢出
@@ -585,13 +736,12 @@ fn resample(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
             out[doff + 1] = to_u8(acc[1]);
             out[doff + 2] = to_u8(acc[2]);
             // alpha 取横向第一个 tap 所在行（不参与加权）
-            let alpha_src = ty.indices[ys] as usize * src_row_bytes
+            let alpha_src = map_row(ty.indices[ys] as usize).min(sh.saturating_sub(1)) * src_row_bytes
                 + tx.indices[xs] as usize * 4
                 + 3;
             out[doff + 3] = src[alpha_src];
         }
     }
-    out
 }
 
 /// 把整张图按 `mode` 缩放后贴到整屏画布上。
@@ -1042,19 +1192,70 @@ mod tests {
         }
     }
 
-    /// 解码要带回**缩放前**的原始尺寸 —— 禁漫解密靠它做分段边界映射。
-    #[test]
-    fn 解码带回原始尺寸() {
+    /// 造一张指定尺寸的 PNG（小图，测试用）。
+    fn png_bytes(w: u32, h: u32) -> Vec<u8> {
         use image::{ImageEncoder, RgbaImage};
-        let img = RgbaImage::from_pixel(40, 30, image::Rgba([10, 20, 30, 255]));
+        let img = RgbaImage::from_pixel(w, h, image::Rgba([10, 20, 30, 255]));
         let mut bytes = Vec::new();
         image::codecs::png::PngEncoder::new(&mut bytes)
-            .write_image(img.as_raw(), 40, 30, image::ExtendedColorType::Rgba8)
+            .write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgba8)
             .unwrap();
+        bytes
+    }
 
-        let d = decode_meta(&bytes).unwrap();
-        assert_eq!((d.orig_w, d.orig_h), (40, 30), "原始尺寸不对");
-        assert_eq!((d.buf.width(), d.buf.height()), (40, 30), "小图不该被缩");
+    /// `decode_full` **不做任何缩放** —— 这是修「解密接缝」的前提。
+    #[test]
+    fn 解码不做缩放() {
+        let d = decode_full(&png_bytes(300, 200)).unwrap();
+        assert_eq!((d.w, d.h), (300, 200), "全分辨率解码不该改尺寸");
+        assert_eq!(d.data.len(), 300 * 200 * 4, "RGBA 缓冲长度不对");
+    }
+
+    /// 尺寸计划：普通页压到 2.5 M 以内，长条漫先按宽度收到 1236。
+    #[test]
+    fn 尺寸计划() {
+        // 普通页 2150×3035 = 6.53 M → 压到 2.5 M 以内
+        let (w, h) = plan_size(2150, 3035, false);
+        assert!((w as u64 * h as u64) <= MAX_PIXELS);
+        assert!(w > 1200, "不该压得太狠，实际 {w}");
+
+        // 长条漫 2150×7516：先按宽度收到 1236，再压到 8 M 以内
+        let (w2, h2) = plan_size(2150, 7516, true);
+        assert!(w2 <= VIEW_W as u32, "长条漫宽度该收到 {VIEW_W}，实际 {w2}");
+        assert!((w2 as u64 * h2 as u64) <= MAX_PIXELS_LONG);
+
+        // 小图不放大
+        assert_eq!(plan_size(800, 1169, false), (800, 1169));
+    }
+
+    /// ⭐ 超过硬上限的图要在**解码前**就被拒绝，而不是解码时才 OOM。
+    ///
+    /// 真机崩溃时那次失败的分配是 64,637,600 字节 = 2150×7516 的 RGBA。
+    /// `image` 的 `Limits.max_alloc` 对 webp 不生效，只能自己量尺寸拦。
+    #[test]
+    fn 超大图被拒绝() {
+        // 真机上真实出现过的尺寸：16.16 M 像素 —— 必须**放行**
+        assert!(
+            oversize_message(2150, 7516).is_none(),
+            "2150×7516 是真机上遇到过的，应该允许解码"
+        );
+        // 缓存里最大的普通页 6.53 M —— 必须放行
+        assert!(oversize_message(2150, 3035).is_none());
+
+        // 28 M 像素 —— 拒绝，并且给出能看懂的话
+        let msg = oversize_message(4000, 7000).expect("4000×7000 应该被拒绝");
+        assert!(msg.contains("太大"), "提示里该说明原因：{msg}");
+        assert!(msg.contains("4000×7000"), "提示里该带尺寸：{msg}");
+    }
+
+    /// `shrink_to` 缩出来的尺寸必须精确等于要求的。
+    #[test]
+    fn 缩小到指定尺寸() {
+        let full = FullImage::from_rgba(vec![128; 100 * 80 * 4], 100, 80);
+        let out = shrink_to(&full, 50, 40);
+        assert_eq!((out.width(), out.height()), (50, 40));
+        // 纯色缩完还是纯色
+        assert!(out.as_bytes().chunks_exact(4).all(|p| p[0] == 128));
     }
 
     /// **一次性对照**（默认忽略）：客户端缩图质量 vs 电脑服务端的 LANCZOS。
