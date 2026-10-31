@@ -796,6 +796,17 @@ struct TagData {
     idx: i32,
 }
 
+/// 详情页标签区的小标题（「角色」「标签」）。
+///
+/// 和 `TagData` 分开两个模型：标题不可点，混进同一个 model 会让
+/// `tag-activated(idx)` 的索引和 `tag_texts` 对不上。
+#[derive(Clone)]
+struct TagHeaderData {
+    text: String,
+    x: i32,
+    y: i32,
+}
+
 /// 推给 UI 的一整屏状态。
 struct View {
     screen: Screen,
@@ -914,6 +925,8 @@ struct View {
     album_cover_w: i32,
     album_cover_h: i32,
     album_tags: Vec<TagData>,
+    /// 标签区的小标题（「角色」「标签」）
+    tag_headers: Vec<TagHeaderData>,
 
     // ---- 阅读器 ----
     page_image: Option<PixelBuffer>,
@@ -1409,6 +1422,8 @@ struct Worker {
     album_cover: Option<PixelBuffer>,
     /// 详情页的标签（位置已算好）
     album_tags: Vec<TagData>,
+    /// 标签区的小标题（「角色」「标签」）
+    tag_headers: Vec<TagHeaderData>,
     /// 标签文字，点第 i 个就拿它去搜索
     tag_texts: Vec<String>,
     page: usize,
@@ -1561,6 +1576,7 @@ impl Worker {
             album_title: String::new(),
             album_cover: None,
             album_tags: Vec::new(),
+            tag_headers: Vec::new(),
             tag_texts: Vec::new(),
             page: 0,
             fit_mode: render::FitMode::default(),
@@ -1687,6 +1703,7 @@ impl Worker {
             album_cover_w: cover_w as i32,
             album_cover_h: cover_h as i32,
             album_tags: self.album_tags.clone(),
+            tag_headers: self.tag_headers.clone(),
             page_image: self.display.clone(),
             reader_title: self.reader_title(),
             scroll_mode: self.scroll_mode,
@@ -1952,6 +1969,22 @@ impl Worker {
         } else if let Some(a) = self.spin_alive.take() {
             a.store(false, Ordering::Relaxed);
         }
+    }
+
+    /// 铺详情页的标签区：角色 + 标签。
+    ///
+    /// 只用这两组，不加「作品」—— 三个组会占满 3 行的预算，标签就只剩 1 行，
+    /// 12 个标签的常见本子会被截掉一大半。作品名基本已经写在标题里了。
+    fn apply_album_tags(&mut self, a: &api::Album) {
+        let groups: Vec<TagGroup> = vec![("角色", &a.actors), ("标签", &a.tags)];
+        let (chips, headers) = layout_tag_groups(&groups);
+
+        // `tag_texts` 直接从排好版的 chips 里取，**不要另存一份** ——
+        // 排版会截断，另存一份的话索引就和实际上屏的对不上了
+        // （表现是「点第 3 个标签搜出来的词是第 5 个」）。
+        self.tag_texts = chips.iter().map(|c| c.label.clone()).collect();
+        self.album_tags = chips;
+        self.tag_headers = headers;
     }
 
     /// 加载区那六个方块填几个。
@@ -3457,8 +3490,7 @@ impl Worker {
                 // 标题/标签/封面，不能留着上一个本子的。
                 self.album_title = a.title.clone();
                 self.album_page = 0;
-                self.tag_texts = a.tags.clone();
-                self.album_tags = layout_tags(&a.tags);
+                self.apply_album_tags(&a);
                 self.album_cover = None;
                 self.album = Some(a);
                 match pos {
@@ -3664,9 +3696,8 @@ impl Worker {
                 // 表现是「详情页显示的永远是之前看过的某个本子的封面」。
                 self.album_cover = None;
 
-                // 标签：排好版交给 UI，并留一份纯文字用于点击后搜索
-                self.tag_texts = a.tags.clone();
-                self.album_tags = layout_tags(&a.tags);
+                // 角色 / 作品 / 标签：排好版交给 UI，并留一份纯文字用于点击后搜索
+                self.apply_album_tags(&a);
 
                 // 先把界面摆出来（没有封面也能看），再去取图
                 self.album = Some(a);
@@ -4694,6 +4725,7 @@ fn apply_view(app: &AppWindow, v: &View) {
             app.set_col_left(to_model(&v.col_left));
             app.set_col_right(to_model(&v.col_right));
             app.set_album_tags(to_tag_model(&v.album_tags));
+            app.set_tag_headers(to_tag_header_model(&v.tag_headers));
         }
 
         if v.kb_seq != applied.2 {
@@ -4830,7 +4862,7 @@ mod tag_layout {
     // 原来它们是绝对坐标（X0=300 / Y0=252），因为那时标签挤在封面**右边**。
     // v5 详情页改成「封面在上、标签在其下通栏」，于是 300/252 这种值
     // 会让标签整个跑到右下角去 —— 表现就是「标签压在目录上」。
-    // 现在统一成偏移量，区域原点由 app.slint 那边给（60px 页边距 + y=508）。
+    // 现在统一成偏移量，区域原点由 app.slint 那边给（60px 页边距 + y=496）。
     /// 标签区左边界（区内偏移）
     pub const X0: i32 = 0;
     /// 标签区右边界：1236 − 60×2 = 1116
@@ -4843,8 +4875,18 @@ mod tag_layout {
     pub const H: i32 = 66;
     pub const GAP_X: i32 = 12;
     pub const GAP_Y: i32 = 14;
-    /// 最多铺几行 —— 多了会挤到下面的目录区
-    pub const MAX_ROWS: i32 = 2;
+    /// 分组标题（「角色」「标签」）占的宽度。标签从它右边开始排。
+    pub const LABEL_W: i32 = 84;
+    /// 最多铺几行 —— 多了会挤到下面的目录区。
+    ///
+    /// 3 行 = 3×66 + 2×14 = 226px。详情页给标签区留的是 496..722，
+    /// 正好差 24px 余量（见 app.slint 里目录区的位置）。
+    pub const MAX_ROWS: i32 = 3;
+
+    /// 一行标签实际能用的宽度（让开左边那列分组标题）。
+    pub fn row_width() -> i32 {
+        X1 - X0 - LABEL_W
+    }
 }
 
 /// 估算一个标签占多少像素宽。
@@ -4856,50 +4898,83 @@ fn chip_width(s: &str) -> i32 {
     for c in s.chars() {
         text += if (c as u32) > 0x2E80 { 26 } else { 14 };
     }
-    (text + 32).clamp(72, tag_layout::X1 - tag_layout::X0)
+    (text + 32).clamp(72, tag_layout::row_width())
 }
 
-/// 把标签排成流式布局：一行放不下就换行。
+/// 详情页标签区的分组：(小标题, 条目)。
+///
+/// 顺序就是显示顺序 —— **角色在前、标签在后**，因为「这本里有谁」
+/// 比「什么类型」更具体，也是用户反馈里点名要的。
+type TagGroup<'a> = (&'a str, &'a [String]);
+
+/// 把若干组标签排成流式布局：一行放不下就换行，总共最多 `MAX_ROWS` 行。
 ///
 /// 为什么在 Rust 里算：Slint 没有内置的换行流式布局，而标签的数量和长度
 /// 都是运行时才知道的。算好 x/y/宽 传过去，UI 那边只按坐标画，简单可靠。
 ///
-/// 超过 `MAX_ROWS` 行就**截断**而不是继续往下排 —— 目录区在那底下，
-/// 标签把目录挤没了得不偿失。
-fn layout_tags(tags: &[String]) -> Vec<TagData> {
+/// 返回 `(标题, 标签)` 两个模型。标题不可点，所以不能和标签混在一个 model 里
+/// （会让 `tag-activated(idx)` 的索引和 `tag_texts` 错位）。
+///
+/// 行数按**先到先得**分配：角色先占，标签用剩下的。
+/// 实测最多的一个本子有 11 个角色（占两行），那样标签就只剩 1 行 ——
+/// 这是刻意的：角色是用户明确要求加的，而且一个本子的角色数量是有限的。
+fn layout_tag_groups(groups: &[TagGroup]) -> (Vec<TagData>, Vec<TagHeaderData>) {
     use tag_layout::*;
 
-    let max_w = X1 - X0;
-    let mut out = Vec::new();
-    let mut x = 0i32;
+    let max_w = row_width();
+    let mut chips = Vec::new();
+    let mut headers = Vec::new();
     let mut row = 0i32;
+    let mut idx = 0i32;
 
-    for (i, t) in tags.iter().enumerate() {
+    for (title, items) in groups {
+        if items.is_empty() {
+            continue;
+        }
         if row >= MAX_ROWS {
             break;
         }
-        let w = chip_width(t);
 
-        // 这一行放不下 → 换行（第一个不换，否则窄标签也会被挤下去）
-        if x > 0 && x + w > max_w {
-            row += 1;
-            x = 0;
+        // 标题和它那组的第一行标签对齐（垂直居中靠 UI 那一侧）
+        headers.push(TagHeaderData {
+            text: (*title).to_string(),
+            x: X0,
+            y: Y0 + row * (H + GAP_Y),
+        });
+
+        let mut x = 0i32;
+        for t in items.iter() {
             if row >= MAX_ROWS {
                 break;
             }
-        }
+            let w = chip_width(t);
 
-        out.push(TagData {
-            label: t.clone(),
-            x: X0 + x,
-            y: Y0 + row * (H + GAP_Y),
-            w,
-            idx: i as i32,
-        });
-        x += w + GAP_X;
+            // 这一行放不下 → 换行（第一个不换，否则窄标签也会被挤下去）
+            if x > 0 && x + w > max_w {
+                row += 1;
+                x = 0;
+                if row >= MAX_ROWS {
+                    break;
+                }
+            }
+
+            chips.push(TagData {
+                label: t.clone(),
+                x: X0 + LABEL_W + x,
+                y: Y0 + row * (H + GAP_Y),
+                w,
+                idx,
+            });
+            idx += 1;
+            x += w + GAP_X;
+        }
+        // 这一组结束后，下一组另起一行（不和上一组挤在同一行）
+        if !items.is_empty() {
+            row += 1;
+        }
     }
 
-    out
+    (chips, headers)
 }
 
 /// 测试用：造一条**没人接收**的命令管道。
@@ -5337,20 +5412,42 @@ mod tag_tests {
     use super::*;
     use tag_layout::*;
 
+    fn 造(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| x.to_string()).collect()
+    }
+
     /// 标签必须排进标签区范围内，不能溢出去压到封面或目录。
     #[test]
     fn 标签不越界() {
-        let tags: Vec<String> = (0..30).map(|i| format!("标签{i}")).collect();
-        for t in layout_tags(&tags) {
+        let tags = 造(&["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"]);
+        let groups: Vec<TagGroup> = vec![("角色", &[]), ("标签", &tags)];
+        let (chips, _) = layout_tag_groups(&groups);
+
+        for t in &chips {
             assert!(
                 t.x >= X0 && t.x + t.w <= X1,
                 "标签「{}」x={} w={} 超出了 {X0}..{X1}",
                 t.label, t.x, t.w
             );
             assert!(t.y >= Y0, "标签「{}」y={} 跑到上面去了", t.label, t.y);
-            // 最多 MAX_ROWS 行
             let rows = (t.y - Y0) / (H + GAP_Y);
             assert!(rows < MAX_ROWS, "标签「{}」排到了第 {rows} 行，超了", t.label);
+        }
+    }
+
+    /// 所有标签都要让开左边的分组标题列。
+    #[test]
+    fn 标签让开标题列() {
+        let tags = 造(&["甲", "乙"]);
+        let groups: Vec<TagGroup> = vec![("标签", &tags)];
+        let (chips, _) = layout_tag_groups(&groups);
+        for t in &chips {
+            assert!(
+                t.x >= LABEL_W,
+                "标签「{}」x={} 压在标题列里（应 >= {LABEL_W}）",
+                t.label,
+                t.x
+            );
         }
     }
 
@@ -5358,50 +5455,120 @@ mod tag_tests {
     #[test]
     fn 标签超行截断() {
         let tags: Vec<String> = (0..100).map(|i| format!("很长的标签名字{i}")).collect();
-        let out = layout_tags(&tags);
-        assert!(out.len() < 100, "应该截断，实际排了 {} 个", out.len());
-        assert!(!out.is_empty(), "不该一个都不排");
+        let groups: Vec<TagGroup> = vec![("标签", &tags)];
+        let (chips, _) = layout_tag_groups(&groups);
+        assert!(chips.len() < 100, "应该截断，实际排了 {} 个", chips.len());
+        assert!(!chips.is_empty(), "不该一个都不排");
     }
 
-    /// 空列表不该 panic，也不该产生任何标签。
+    /// 空列表不该 panic，也不该产生任何标签或标题。
     #[test]
     fn 空标签安全() {
-        assert!(layout_tags(&[]).is_empty());
+        let empty: [String; 0] = [];
+        let groups: Vec<TagGroup> = vec![("角色", &empty), ("标签", &empty)];
+        let (chips, headers) = layout_tag_groups(&groups);
+        assert!(chips.is_empty());
+        assert!(headers.is_empty(), "没有条目时不该画标题");
     }
 
-    /// 单个超长的标签要被夹到标签区宽度以内，不能溢出。
+    /// 单个超长的标签要被夹到一行可用宽度以内，不能溢出。
     #[test]
     fn 超长标签被夹住() {
-        let long = "这是一个特别特别特别特别特别特别特别特别特别特别特别长的标签名字".to_string();
-        let out = layout_tags(&[long]);
-        assert_eq!(out.len(), 1);
+        let long = 造(&["这是一个特别特别特别特别特别特别特别特别特别特别特别长的标签名字"]);
+        let groups: Vec<TagGroup> = vec![("标签", &long)];
+        let (chips, _) = layout_tag_groups(&groups);
+        assert_eq!(chips.len(), 1);
         assert!(
-            out[0].x + out[0].w <= X1,
+            chips[0].x + chips[0].w <= X1,
             "超长标签没被夹住：x={} w={}",
-            out[0].x,
-            out[0].w
+            chips[0].x,
+            chips[0].w
         );
     }
 
-    /// idx 要对应原始下标 —— 点错了标签就会搜错东西。
+    /// ⭐ idx 要按**排版后的顺序**连续编号 —— 点错了标签就会搜错东西。
+    ///
+    /// `apply_album_tags` 用 chips 的顺序去生成 `tag_texts`，两边必须一致。
     #[test]
-    fn 标签下标对应原数组() {
-        let tags: Vec<String> = vec!["甲".into(), "乙".into(), "丙".into()];
-        let out = layout_tags(&tags);
-        assert_eq!(out.len(), 3);
-        for (i, t) in out.iter().enumerate() {
-            assert_eq!(t.idx, i as i32, "第 {i} 个标签的 idx 不对");
-            assert_eq!(t.label, tags[i]);
+    fn 标签下标连续且对应标签() {
+        let actors = 造(&["真寻", "美波里"]);
+        let tags = 造(&["萝莉", "中文", "全彩"]);
+        let groups: Vec<TagGroup> = vec![("角色", &actors), ("标签", &tags)];
+        let (chips, _) = layout_tag_groups(&groups);
+
+        assert_eq!(chips.len(), 5);
+        for (i, c) in chips.iter().enumerate() {
+            assert_eq!(c.idx, i as i32, "第 {i} 个 chip 的 idx 不对");
+        }
+        // 顺序：角色在前、标签在后
+        let labels: Vec<&str> = chips.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, vec!["真寻", "美波里", "萝莉", "中文", "全彩"]);
+    }
+
+    /// 两组的标题都要出现，而且各自在**自己那组的第一行**上。
+    #[test]
+    fn 分组标题位置正确() {
+        let actors = 造(&["真寻"]);
+        let tags = 造(&["萝莉", "中文"]);
+        let groups: Vec<TagGroup> = vec![("角色", &actors), ("标签", &tags)];
+        let (chips, headers) = layout_tag_groups(&groups);
+
+        assert_eq!(headers.len(), 2, "两组都该有标题");
+        assert_eq!(headers[0].text, "角色");
+        assert_eq!(headers[1].text, "标签");
+        assert_eq!(headers[0].y, Y0, "第一组标题该在第一行");
+        assert_eq!(
+            headers[1].y,
+            Y0 + (H + GAP_Y),
+            "第二组标题该在第二行（角色占了第一行）"
+        );
+
+        // 标题的 y 要和同组第一个标签对齐
+        assert_eq!(chips[0].y, headers[0].y);
+        assert_eq!(chips[1].y, headers[1].y);
+    }
+
+    /// **两组不能挤在同一行** —— 否则标题只有一条，看不出分组。
+    #[test]
+    fn 两组各占一行() {
+        let actors = 造(&["甲"]);
+        let tags = 造(&["乙"]);
+        let groups: Vec<TagGroup> = vec![("角色", &actors), ("标签", &tags)];
+        let (chips, _) = layout_tag_groups(&groups);
+
+        assert_eq!(chips.len(), 2);
+        assert_ne!(
+            chips[0].y, chips[1].y,
+            "角色和标签挤在同一行了，分组就看不出来了"
+        );
+    }
+
+    /// 角色多到占满 MAX_ROWS 时，标签**整组不显示**（而不是画一个没内容的标题）。
+    #[test]
+    fn 角色占满时标签整组隐藏() {
+        let actors: Vec<String> = (0..40).map(|i| format!("角色{i}")).collect();
+        let tags = 造(&["萝莉"]);
+        let groups: Vec<TagGroup> = vec![("角色", &actors), ("标签", &tags)];
+        let (chips, headers) = layout_tag_groups(&groups);
+
+        // 角色标题一定有；标签标题只有在还有行的时候才画
+        assert_eq!(headers[0].text, "角色");
+        for h in &headers {
+            assert_eq!(h.text, "角色", "标签组没有行可用，不该画它的标题");
+        }
+        for c in &chips {
+            assert!(c.label.starts_with("角色"), "不该出现标签：{}", c.label);
         }
     }
 
     /// 同一行的标签不能重叠。
     #[test]
     fn 标签不重叠() {
-        let tags: Vec<String> = (0..8).map(|i| format!("T{i}")).collect();
-        let out = layout_tags(&tags);
-        for a in &out {
-            for b in &out {
+        let tags = 造(&["T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7"]);
+        let groups: Vec<TagGroup> = vec![("标签", &tags)];
+        let (chips, _) = layout_tag_groups(&groups);
+        for a in &chips {
+            for b in &chips {
                 if a.idx >= b.idx || a.y != b.y {
                     continue; // 只看同一行、且 a 在 b 左边的情况
                 }
@@ -6149,6 +6316,22 @@ fn to_tag_model(tags: &[TagData]) -> slint::ModelRc<TagChip> {
             y: t.y,
             w: t.w,
             idx: t.idx,
+        })
+        .collect();
+    slint::ModelRc::new(slint::VecModel::from(v))
+}
+
+/// 标签区小标题 → Slint 模型。
+///
+/// ⚠️ 参数是自己的 `TagHeaderData`，返回值是 Slint 生成的 `TagHeader`——
+///    两个名字太像，故意在签名里写全，免得以后又搞混。
+fn to_tag_header_model(items: &[TagHeaderData]) -> slint::ModelRc<TagHeader> {
+    let v: Vec<TagHeader> = items
+        .iter()
+        .map(|h| TagHeader {
+            text: h.text.clone().into(),
+            x: h.x,
+            y: h.y,
         })
         .collect();
     slint::ModelRc::new(slint::VecModel::from(v))

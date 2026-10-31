@@ -237,6 +237,37 @@ else
 fi
 
 echo
+echo "=== 19. 详情页标签区不能压到目录 ==="
+#
+# 标签区（角色 + 标签）最多 3 行 = 226px，从 y=496 排到 722；
+# 目录标题在 744。这个间距是算出来的，改任何一边都要重算 ——
+# 历史上就因为「标签高度 52 / 界面画 66」两边不一致，两行标签多算
+# 28px，正好压到目录第一行上。
+# ⚠️ 剥注释不能省：上面这段说明里就写着 y=496 / 744。
+DETAIL=$(awk '$0 ~ "if root.screen == 7 : Rectangle", /^    \}$/' app.slint | sed 's|//.*||')
+TAG_Y=$(echo "$DETAIL" | grep -oE '^\s+y: 496px' | head -1)
+DIR_Y=$(echo "$DETAIL" | grep -oE '^\s+y: 744px' | head -1)
+if [ -n "$TAG_Y" ] && [ -n "$DIR_Y" ]; then
+  echo "  OK   标签区 y=496、目录标题 y=744（中间留 22px 余量）"
+else
+  echo "  *** 详情页的标签区/目录标题坐标变了 —— 重新算一遍间距"; FAIL=1
+fi
+
+# 章节区最后一行不能越过翻页条（1400）
+if echo "$DETAIL" | grep -qE 'y: 800px \+ i \* 100px'; then
+  echo "  OK   章节 6 行 × 100px 从 800 起 → 1400，正好停在翻页条上"
+else
+  echo "  *** 章节行的起点/行高变了 —— 确认最后一行没被翻页条盖住"; FAIL=1
+fi
+
+# 分组标题和标签必须是两个模型（混在一起会让点击索引错位）
+if grep -q 'tag-headers' chrome.slint 2>/dev/null || grep -q 'in property <\[TagHeader\]>' app.slint; then
+  echo "  OK   分组标题是独立模型（tag-headers），不和 TagChip 混用"
+else
+  echo "  *** 找不到 tag-headers —— 标题可能混进 TagChip，点击会搜错词"; FAIL=1
+fi
+
+echo
 echo "=== 10. 六档灰之外的颜色（规格 2.1）==="
 for f in tokens.slint icons.slint chrome.slint app.slint; do
   H=$(sed 's|//.*||' "$f" | grep -oE '#[0-9a-fA-F]{3,8}' | sort -u \

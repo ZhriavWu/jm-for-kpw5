@@ -73,6 +73,16 @@ export struct TagChip {
     idx: int,
 }
 
+/// 标签区左边那列小标题（「角色」「标签」）。
+///
+/// ⚠️ 和 `TagChip` 分成两个模型：标题不可点，混进同一个模型会让
+///    `tag-activated(idx)` 的索引和 `tag_texts` 错位。
+export struct TagHeader {
+    text: string,
+    x: int,
+    y: int,
+}
+
 /// 一个键帽。规格 4.2：字母键 100×100 / 3px 边框 / 40px 字；
 /// 功能键字号 30px，宽度由调用方给（删除 168 / 空格 320 / 搜索 256 / 收起 168）。
 component Key inherits Rectangle {
@@ -612,6 +622,8 @@ export component AppWindow inherits Window {
     /// **由 Rust 拼好**：Slint 量不了文字宽度，两个 Text 想挨着排就得知道前一个多宽。
     in property <string> album-byline: "";
     in property <[TagChip]> album-tags: [];
+    /// 标签区的小标题（「角色」「标签」）
+    in property <[TagHeader]> tag-headers: [];
 
     // ---- 阅读器 ----
     in property <image> page-image;
@@ -2058,38 +2070,66 @@ export component AppWindow inherits Window {
             }
         }
 
-        // ---- 标签（通栏，最多两行）----
+        // ---- 标签区：角色 + 标签（通栏，最多三行）----
         //
         // t.x / t.y 是**相对于标签区左上角的偏移**（见 tag_layout 的注释），
-        // 区域原点就是下面这个 60px / 508px。
-        for t[i] in root.album-tags : Rectangle {
-            x: 60px + t.x * 1px;
-            y: 508px + t.y * 1px;
-            width: t.w * 1px;
-            height: 66px;
-            background: Tok.paper;
-            border-width: Tok.hairline;
-            border-color: Tok.ink;
+        // 区域原点就是下面这个 60px / 496px。
+        //
+        // 最多三行 = 3×66 + 2×14 = 226px → 496..722。
+        // 行数按「先到先得」分给两组：角色先占，标签用剩下的
+        // （最多 11 个角色的本子会占两行，那时标签只剩一行）。
+        Rectangle {
+            x: 60px;
+            y: 496px;
+            width: Tok.screen-w - 120px;
+            height: 226px;
+            background: transparent;
+            clip: true;
 
-            Text {
-                text: t.label;
-                color: Tok.ink;
+            // 左边那列小标题
+            for h[i] in root.tag-headers : Text {
+                x: h.x * 1px;
+                y: h.y * 1px;
+                width: 84px - 12px;
+                height: 66px;
+                text: h.text;
+                color: Tok.g5;
                 font-size: 28px;
-                horizontal-alignment: center;
+                horizontal-alignment: TextHorizontalAlignment.left;
                 vertical-alignment: center;
-                width: parent.width;
-                height: parent.height;
                 overflow: elide;
             }
-            TouchArea {
-                clicked => { root.tag-activated(t.idx); }
+
+            // 标签本体
+            for t[i] in root.album-tags : Rectangle {
+                x: t.x * 1px;
+                y: t.y * 1px;
+                width: t.w * 1px;
+                height: 66px;
+                background: Tok.paper;
+                border-width: Tok.hairline;
+                border-color: Tok.ink;
+
+                Text {
+                    text: t.label;
+                    color: Tok.ink;
+                    font-size: 28px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: parent.width;
+                    height: parent.height;
+                    overflow: elide;
+                }
+                TouchArea {
+                    clicked => { root.tag-activated(t.idx); }
+                }
             }
         }
 
         // ---- 目录区标题 ----
         Rectangle {
             x: 60px;
-            y: 668px;
+            y: 744px;
             width: Tok.screen-w - 120px;
             height: 48px;
             background: transparent;
@@ -2121,17 +2161,20 @@ export component AppWindow inherits Window {
         //
         // 12 个/页 = 2 列 × 6 行（和 CHAPTERS_PER_PAGE 一致）。
         //
-        // 行高 112、起点 726，算下来 726 + 6×112 = 1398 —— 正好停在翻页条
-        // （1400）上面。原来起点 656、行高 150，6 行要到 1556，
-        // **最后两行被翻页条整个盖住了**，点都点不到。
+        // 行高 100、起点 800，算下来 800 + 6×100 = 1400 —— 正好停在翻页条
+        // （1400）上面。原来行高 112、起点 726，但标签区从 2 行涨到 3 行之后
+        // 那套坐标会顶到翻页条，所以压到 100。
+        //
+        // ⚠️ 改这里的行高/起点，要同步看 `CHAPTERS_PER_PAGE` 和
+        //    `check-ui-spec.sh` —— 少一行用户翻不到，多一行被翻页条盖住。
         //
         // 章节没有封面，所以 show-thumb: false —— 不然每行左边挂一个空框，
         // 看着像图没加载出来。
         for r[i] in root.col-left : ListLine {
             x: 60px;
-            y: 726px + i * 112px;
+            y: 800px + i * 100px;
             width: 540px;
-            height: 112px;
+            height: 100px;
             label: r.label;
             meta: r.sub;
             star: r.star;
@@ -2141,9 +2184,9 @@ export component AppWindow inherits Window {
         }
         for r[i] in root.col-right : ListLine {
             x: 636px;
-            y: 726px + i * 112px;
+            y: 800px + i * 100px;
             width: 540px;
-            height: 112px;
+            height: 100px;
             label: r.label;
             meta: r.sub;
             star: r.star;

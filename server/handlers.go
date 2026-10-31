@@ -161,6 +161,11 @@ func (s *Server) handleAlbum(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// 角色和作品在**原始字段里**，jmapi 的 AlbumDetail 没有对应字段
+	// （它只映射了 tags）。实测格式是字符串数组：
+	//   "actors": ["森亚露露卡"]
+	//   "works":  ["名侦探光之美少女"]
+	// 客户端详情页把它们和 tags 一起当「可点的筛选标签」展示。
 	writeJSON(w, 200, map[string]any{
 		"ok":            true,
 		"id":            a.ID,
@@ -170,6 +175,8 @@ func (s *Server) handleAlbum(w http.ResponseWriter, r *http.Request) {
 		"page_count":    asInt(a.Raw["total_photos"]),
 		"chapter_count": len(chapters),
 		"tags":          a.Tags,
+		"actors":        asStringSlice(a.Raw["actors"]),
+		"works":         asStringSlice(a.Raw["works"]),
 		"chapters":      chapters,
 	})
 }

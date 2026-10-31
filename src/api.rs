@@ -188,6 +188,16 @@ pub struct Album {
     pub chapter_count: u32,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// **角色**（作品里出场的人物），如 `["森亚露露卡"]`。
+    ///
+    /// `#[serde(default)]` 不能省：旧服务端（Python 版）没有这个字段，
+    /// 缺了它整个 `/api/album` 反序列化失败 —— 表现是「本子打不开」。
+    #[serde(default)]
+    pub actors: Vec<String>,
+    /// **作品**（原作 / 系列），如 `["名侦探光之美少女"]`。
+    /// 同样要 default。
+    #[serde(default)]
+    pub works: Vec<String>,
     pub chapters: Vec<Chapter>,
 }
 

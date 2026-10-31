@@ -354,6 +354,20 @@ func asInt(v any) int {
 	return n
 }
 
+// asStringSlice 把 `["a","b"]` 收成 `[]string`，顺手去掉空项和首尾空白。
+//
+// 上游的 actors / works 是字符串数组，但偶尔会混进 null 或空串
+// （实测 `works` 里出现过空字符串），空标签画出来就是个空框。
+func asStringSlice(v any) []string {
+	out := make([]string, 0)
+	for _, item := range asSlice(v) {
+		if s := asStr(item); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // ---------------------------------------------------------------- 预取 / 状态（兼容接口）
 
 func (s *Server) handlePrefetch(w http.ResponseWriter, r *http.Request) {
