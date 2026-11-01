@@ -3,7 +3,7 @@
 #   正向 —— 修好的代码应该通过
 #   负向 —— 把夹取去掉，测试必须失败（否则就是假绿灯）
 set -u
-cd "$(dirname "$0")" || exit 1
+cd "$(dirname "$0")/.." || exit 1
 . "$HOME/.cargo/env"
 export CARGO_TARGET_DIR=/root/target/kindle-manga
 

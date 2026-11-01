@@ -572,11 +572,28 @@ bash kual/package-kual.sh
 ## 测试
 
 ```bash
-cargo test --workspace          # 客户端 136 + vendor 后端 11
-cd server && go test ./...      # 服务端
-bash check-ui-spec.sh           # UI 规格 18 条
+cargo test --workspace          # 客户端 149 + vendor 后端 16
+cd server && go test ./...      # 服务端 13
+bash check-ui-spec.sh           # UI 规格 20 条
 bash check-font-coverage.sh     # 字体覆盖（缺字渲染成空白，不报错）
 ```
+
+> 也可以用 `bash scripts/_test.sh` —— 它跑的是同一套（带 `--workspace`），
+> 输出更紧凑（只打结果和警告数）。
+
+### 目录约定
+
+根目录只留**三个每天都用**的脚本：
+
+| 脚本 | 干什么 |
+|---|---|
+| `check-ui-spec.sh` | UI 规格检查 |
+| `check-font-coverage.sh` | 字体覆盖 |
+| `dev-ui.sh` | 编译并启动桌面预览 |
+
+其余一次性脚本（构建、排查、截图分析、慢代理……）都在 `scripts/`，
+清单见 [`scripts/README.md`](scripts/README.md)。它们都会自己算出项目根，
+在哪个目录下调用都行。
 
 ### 需要样本的测试（默认忽略）
 
@@ -592,7 +609,7 @@ cargo test --release --bin kindle-manga 缩放质量 -- --ignored --nocapture
 
 ### 写测试的几条经验（这个项目特有）
 
-- **`cargo check` 不产出二进制**，增量判断还会「空转」→ 用 `_force_build.sh`
+- **`cargo check` 不产出二进制**，增量判断还会「空转」→ 用 `scripts/_force_build.sh`
 - **测之前必须重编**：直接用旧二进制会「改了没效果」（栽过两次）
 - **写 grep 类检查必须先剥注释**（`sed 's|//.*||'`）：
   说明文字里写着的字样会把检查喂饱 = **假绿灯**

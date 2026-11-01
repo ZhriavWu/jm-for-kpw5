@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u
 . "$HOME/.cargo/env"
-cd "$(dirname "$0")" || exit 1
+cd "$(dirname "$0")/.." || exit 1
 export CARGO_TARGET_DIR=/root/target/kindle-manga
 cargo test --workspace --target x86_64-unknown-linux-gnu > /tmp/t.log 2>&1
 echo "exit=$?"

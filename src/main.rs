@@ -927,6 +927,17 @@ struct View {
     album_tags: Vec<TagData>,
     /// 标签区的小标题（「角色」「标签」）
     tag_headers: Vec<TagHeaderData>,
+    /// 最后一行末尾那个「详情」格子（0 或 1 个）
+    tag_more: Vec<TagData>,
+
+    // ---- 全部标签弹窗 ----
+    detail_shown: bool,
+    detail_chips: Vec<TagData>,
+    detail_headers: Vec<TagHeaderData>,
+    /// 「第 1 / 2 页」，单页时是空串（不画翻页条）
+    detail_page_info: String,
+    detail_has_prev: bool,
+    detail_has_next: bool,
 
     // ---- 阅读器 ----
     page_image: Option<PixelBuffer>,
@@ -968,6 +979,12 @@ enum Cmd {
     StarHit(i32),
     /// 点标签 → 按标签搜
     TagActivated(usize),
+    /// 点详情页最后一行末尾的「详情」→ 打开「全部标签」弹窗
+    OpenDetailTags,
+    /// 关掉「全部标签」弹窗
+    CloseDetailTags,
+    /// 弹窗翻页，-1 上一页 / +1 下一页
+    DetailTagsPage(i32),
     /// 点搜索页「最近搜索」里的第 i 条 → 直接用它重搜
     RecentPicked(usize),
     /// 清空最近搜索
@@ -1439,8 +1456,21 @@ struct Worker {
     album_tags: Vec<TagData>,
     /// 标签区的小标题（「角色」「标签」）
     tag_headers: Vec<TagHeaderData>,
-    /// 标签文字，点第 i 个就拿它去搜索
+    /// 详情页最后一行末尾那个「详情」格子（`None` = 不画）
+    tag_more: Option<TagData>,
+    /// 标签文字，点第 i 个就拿它去搜索。**完整列表**（角色 ++ 标签）
     tag_texts: Vec<String>,
+    /// 当前的原始列表（弹窗翻页时要重排）
+    album_roles: Vec<String>,
+    album_tag_list: Vec<String>,
+
+    // 全部标签弹窗
+    detail_shown: bool,
+    detail_page: usize,
+    detail_pages: usize,
+    detail_chips: Vec<TagData>,
+    detail_headers: Vec<TagHeaderData>,
+
     page: usize,
 
     // 阅读器
@@ -1592,7 +1622,15 @@ impl Worker {
             album_cover: None,
             album_tags: Vec::new(),
             tag_headers: Vec::new(),
+            tag_more: None,
             tag_texts: Vec::new(),
+            album_roles: Vec::new(),
+            album_tag_list: Vec::new(),
+            detail_shown: false,
+            detail_page: 0,
+            detail_pages: 1,
+            detail_chips: Vec::new(),
+            detail_headers: Vec::new(),
             page: 0,
             fit_mode: render::FitMode::default(),
             reader_menu: false,
@@ -1719,6 +1757,17 @@ impl Worker {
             album_cover_h: cover_h as i32,
             album_tags: self.album_tags.clone(),
             tag_headers: self.tag_headers.clone(),
+            tag_more: self.tag_more.iter().cloned().collect(),
+            detail_shown: self.detail_shown,
+            detail_chips: self.detail_chips.clone(),
+            detail_headers: self.detail_headers.clone(),
+            detail_page_info: if self.detail_pages > 1 {
+                format!("第 {} / {} 页", self.detail_page + 1, self.detail_pages)
+            } else {
+                String::new()
+            },
+            detail_has_prev: self.detail_page > 0,
+            detail_has_next: self.detail_page + 1 < self.detail_pages,
             page_image: self.display.clone(),
             reader_title: self.reader_title(),
             scroll_mode: self.scroll_mode,
@@ -2006,14 +2055,55 @@ impl Worker {
         );
 
         let groups: Vec<TagGroup> = vec![("角色", &a.actors), ("标签", &a.tags)];
-        let (chips, headers) = layout_tag_groups(&groups);
 
-        // `tag_texts` 直接从排好版的 chips 里取，**不要另存一份** ——
-        // 排版会截断，另存一份的话索引就和实际上屏的对不上了
-        // （表现是「点第 3 个标签搜出来的词是第 5 个」）。
-        self.tag_texts = chips.iter().map(|c| c.label.clone()).collect();
+        // ⚠️ `tag_texts` 存**完整列表**（角色 ++ 标签），不是截断后的。
+        //
+        // 详情页那三行是截断的，弹窗里是全部的 —— 两边共用同一份文字表，
+        // 所以 `tag-activated(idx)` 不管在哪一屏点都是对的。
+        // 两个排版函数都按「角色在前、标签在后」的顺序连续编号，天然对齐。
+        self.tag_texts = a
+            .actors
+            .iter()
+            .chain(a.tags.iter())
+            .cloned()
+            .collect();
+
+        let (chips, headers, more) = layout_detail_tags(&groups);
         self.album_tags = chips;
         self.tag_headers = headers;
+        self.tag_more = more.clone();
+        if let Some(m) = &more {
+            log::info!(
+                "详情页标签：{} 个上屏，「详情」格子放在 x={} y={} w={}",
+                self.album_tags.len(),
+                m.x,
+                m.y,
+                m.w
+            );
+        }
+
+        // 弹窗内容用的原始列表。存下来是因为翻页时要重排，
+        // 而那时 `self.album` 可能还没赋值（调用方先铺标签再设 album）。
+        self.album_roles = a.actors.clone();
+        self.album_tag_list = a.tags.clone();
+
+        self.detail_page = 0;
+        self.rebuild_detail_tags();
+    }
+
+    /// 按当前页码重铺「全部标签」弹窗的内容。
+    fn rebuild_detail_tags(&mut self) {
+        let groups: Vec<TagGroup> = vec![
+            ("角色", &self.album_roles),
+            ("标签", &self.album_tag_list),
+        ];
+        let (chips, headers, pages) = layout_popup_tags(&groups, self.detail_page);
+        self.detail_chips = chips;
+        self.detail_headers = headers;
+        self.detail_pages = pages;
+        if self.detail_page >= pages {
+            self.detail_page = pages - 1;
+        }
     }
 
     /// 加载区那六个方块填几个。
@@ -2281,25 +2371,30 @@ impl Worker {
                 }
             }
 
-            Cmd::NavPicked(i) => match i {
-                0 => self.open_history(),
-                1 => self.open_search(),
-                2 => {
-                    self.nav_return = self.screen;
-                    self.screen = Screen::Home;
-                    self.emit();
+            Cmd::NavPicked(i) => {
+                // 底栏能看见就说明用户想离开这一屏 —— 弹窗先收掉，
+                // 否则它会盖在新的一屏上（弹窗是 root 级的覆盖层）。
+                self.detail_shown = false;
+                match i {
+                    0 => self.open_history(),
+                    1 => self.open_search(),
+                    2 => {
+                        self.nav_return = self.screen;
+                        self.screen = Screen::Home;
+                        self.emit();
+                    }
+                    3 => self.open_favorites(),
+                    4 => {
+                        self.nav_return = self.screen;
+                        self.screen = Screen::Settings;
+                        // 进设置页顺手查一次磁盘用量 —— 这个值只有服务端知道。
+                        // 异步查，不挡着界面先出来。
+                        self.emit();
+                        self.fetch_cache_stats();
+                    }
+                    _ => {}
                 }
-                3 => self.open_favorites(),
-                4 => {
-                    self.nav_return = self.screen;
-                    self.screen = Screen::Settings;
-                    // 进设置页顺手查一次磁盘用量 —— 这个值只有服务端知道。
-                    // 异步查，不挡着界面先出来。
-                    self.emit();
-                    self.fetch_cache_stats();
-                }
-                _ => {}
-            },
+            }
 
             Cmd::SetEditServer => {
                 // 预填当前地址，改一个数字就行，不用整串重敲
@@ -2391,7 +2486,37 @@ impl Worker {
                     // 标签搜索是从详情页发起的，不是用户在手打，直接把键盘收起来看结果
                     self.start_search_input(&tag);
                     self.kb_shown = false;
+                    // 从弹窗里点的，弹窗也得收掉 —— 否则搜索结果会被它盖住
+                    self.detail_shown = false;
                     self.do_search(1);
+                }
+            }
+            Cmd::OpenDetailTags => {
+                if self.tag_texts.is_empty() {
+                    self.say("这一本没有角色和标签");
+                    self.emit();
+                } else {
+                    log::info!(
+                        "打开「全部标签」：共 {} 个，{} 页",
+                        self.tag_texts.len(),
+                        self.detail_pages
+                    );
+                    self.detail_shown = true;
+                    self.emit();
+                }
+            }
+            Cmd::CloseDetailTags => {
+                self.detail_shown = false;
+                self.emit();
+            }
+            Cmd::DetailTagsPage(d) => {
+                let next = self.detail_page as i32 + d;
+                let last = (self.detail_pages.max(1) - 1) as i32;
+                let clamped = next.clamp(0, last) as usize;
+                if clamped != self.detail_page {
+                    self.detail_page = clamped;
+                    self.rebuild_detail_tags();
+                    self.emit();
                 }
             }
             Cmd::RecentPicked(i) => {
@@ -4471,6 +4596,16 @@ impl Worker {
     // ------------------------------------------------------------ 返回
 
     fn back(&mut self) {
+        // 「全部标签」弹窗开着时，返回键先关弹窗 —— 不跳屏。
+        //
+        // 这是弹窗类界面的一般规矩：用户按返回是想退出这一层，
+        // 而不是直接退到上一个屏（那样会连着退两级，很意外）。
+        if self.detail_shown {
+            self.detail_shown = false;
+            self.emit();
+            return;
+        }
+
         let from = self.screen;
         let target = back_target(
             from,
@@ -4728,6 +4863,14 @@ fn apply_view(app: &AppWindow, v: &View) {
     app.set_reader_starred(v.reader_starred);
     app.set_reader_hint(v.reader_hint);
 
+    // ---- 全部标签弹窗 ----
+    app.set_detail_shown(v.detail_shown);
+    app.set_detail_chips(to_tag_model(&v.detail_chips));
+    app.set_detail_headers(to_tag_header_model(&v.detail_headers));
+    app.set_detail_page_info(v.detail_page_info.clone().into());
+    app.set_detail_has_prev(v.detail_has_prev);
+    app.set_detail_has_next(v.detail_has_next);
+
     // ---- 详情页 ----
     app.set_album_title(v.album_title.clone().into());
     app.set_album_byline(v.album_byline.clone().into());
@@ -4755,6 +4898,7 @@ fn apply_view(app: &AppWindow, v: &View) {
             app.set_col_right(to_model(&v.col_right));
             app.set_album_tags(to_tag_model(&v.album_tags));
             app.set_tag_headers(to_tag_header_model(&v.tag_headers));
+            app.set_tag_more(to_tag_model(&v.tag_more));
         }
 
         if v.kb_seq != applied.2 {
@@ -4918,16 +5062,21 @@ mod tag_layout {
     }
 }
 
-/// 估算一个标签占多少像素宽。
+/// 估算一个标签占多少像素宽（上限由调用方给）。
 ///
 /// 只是排版用的近似值，差几个像素看不出来。中日文按一个字 26px 估，
 /// 其余（拉丁字母/数字/空格）按 14px。两边各留 16px 内边距。
-fn chip_width(s: &str) -> i32 {
+fn chip_width_at(s: &str, max_w: i32) -> i32 {
     let mut text = 0;
     for c in s.chars() {
         text += if (c as u32) > 0x2E80 { 26 } else { 14 };
     }
-    (text + 32).clamp(72, tag_layout::row_width())
+    (text + 32).clamp(72, max_w)
+}
+
+/// 详情页标签区的宽度下，一个标签多宽。
+fn chip_width(s: &str) -> i32 {
+    chip_width_at(s, tag_layout::row_width())
 }
 
 /// 详情页标签区的分组：(小标题, 条目)。
@@ -4936,21 +5085,14 @@ fn chip_width(s: &str) -> i32 {
 /// 比「什么类型」更具体，也是用户反馈里点名要的。
 type TagGroup<'a> = (&'a str, &'a [String]);
 
-/// 把若干组标签排成流式布局：一行放不下就换行，总共最多 `MAX_ROWS` 行。
+/// 把详情页的两组标签排成**全部**（不截断），返回 `(chips, headers)`。
 ///
-/// 为什么在 Rust 里算：Slint 没有内置的换行流式布局，而标签的数量和长度
-/// 都是运行时才知道的。算好 x/y/宽 传过去，UI 那边只按坐标画，简单可靠。
-///
-/// 返回 `(标题, 标签)` 两个模型。标题不可点，所以不能和标签混在一个 model 里
-/// （会让 `tag-activated(idx)` 的索引和 `tag_texts` 错位）。
-///
-/// 行数按**先到先得**分配：角色先占，标签用剩下的。
-/// 实测最多的一个本子有 11 个角色（占两行），那样标签就只剩 1 行 ——
-/// 这是刻意的：角色是用户明确要求加的，而且一个本子的角色数量是有限的。
-fn layout_tag_groups(groups: &[TagGroup]) -> (Vec<TagData>, Vec<TagHeaderData>) {
+/// `idx` 指向「角色 ++ 标签」拼起来的完整列表 —— 详情页和弹窗共用同一份
+/// 文字表，所以不管在哪一屏点，`tag_texts[idx]` 都是对的。
+fn lay_out_all_tags(groups: &[TagGroup], width: i32, max_rows: i32) -> (Vec<TagData>, Vec<TagHeaderData>) {
     use tag_layout::*;
 
-    let max_w = row_width();
+    let max_w = width - LABEL_W;
     let mut chips = Vec::new();
     let mut headers = Vec::new();
     let mut row = 0i32;
@@ -4960,7 +5102,7 @@ fn layout_tag_groups(groups: &[TagGroup]) -> (Vec<TagData>, Vec<TagHeaderData>) 
         if items.is_empty() {
             continue;
         }
-        if row >= MAX_ROWS {
+        if row >= max_rows {
             break;
         }
 
@@ -4973,16 +5115,16 @@ fn layout_tag_groups(groups: &[TagGroup]) -> (Vec<TagData>, Vec<TagHeaderData>) 
 
         let mut x = 0i32;
         for t in items.iter() {
-            if row >= MAX_ROWS {
+            if row >= max_rows {
                 break;
             }
-            let w = chip_width(t);
+            let w = chip_width_at(t, max_w);
 
             // 这一行放不下 → 换行（第一个不换，否则窄标签也会被挤下去）
             if x > 0 && x + w > max_w {
                 row += 1;
                 x = 0;
-                if row >= MAX_ROWS {
+                if row >= max_rows {
                     break;
                 }
             }
@@ -5004,6 +5146,158 @@ fn layout_tag_groups(groups: &[TagGroup]) -> (Vec<TagData>, Vec<TagHeaderData>) 
     }
 
     (chips, headers)
+}
+
+/// 只有测试用的简写：详情页宽度 + 三行上限，不带「详情」格子。
+///
+/// 生产代码走 [`layout_detail_tags`]（它会额外挤一个「详情」）和
+/// [`layout_popup_tags`]（弹窗，不截断）。这个包装留着是为了让
+/// `tag_tests` 里那批排版断言继续有效。
+#[cfg(test)]
+fn layout_tag_groups(groups: &[TagGroup]) -> (Vec<TagData>, Vec<TagHeaderData>) {
+    lay_out_all_tags(
+        groups,
+        tag_layout::X1 - tag_layout::X0,
+        tag_layout::MAX_ROWS,
+    )
+}
+
+/// 详情页那三行：在 `MAX_ROWS` 行之内排，另外在**最后一行的末尾**挤一个
+/// 「详情」格子。
+///
+/// 挤的方式：先按正常规则排，再看最后一行的右边界还剩多少。
+///
+/// * 放得下 → 接在后面；
+/// * 放不下 → **右对齐到行尾**，并把这一行末尾挡路的标签去掉（最多一两个）。
+///   之所以不去掉整行重排，是因为那样会把本来放得下的标签也挤到下一行，
+///   而 `MAX_ROWS` 只有 3 行，一挤就丢一批。
+fn layout_detail_tags(groups: &[TagGroup]) -> (Vec<TagData>, Vec<TagHeaderData>, Option<TagData>) {
+    use tag_layout::*;
+
+    let (mut chips, headers) = lay_out_all_tags(groups, X1 - X0, MAX_ROWS);
+
+    let label = "详情";
+    let w = chip_width(label);
+    let row_y = |row: i32| Y0 + row * (H + GAP_Y);
+
+    // 最后一行（没有标签时算第 0 行）
+    let last_row = chips
+        .iter()
+        .map(|c| (c.y - Y0) / (H + GAP_Y))
+        .max()
+        .unwrap_or(0);
+    let end_x = chips
+        .iter()
+        .filter(|c| (c.y - Y0) / (H + GAP_Y) == last_row)
+        .map(|c| c.x + c.w)
+        .max()
+        .unwrap_or(X0 + LABEL_W);
+
+    let x = if end_x + GAP_X + w <= X1 {
+        end_x + GAP_X
+    } else {
+        // 右对齐，并清掉这一行里会被它盖住的标签
+        let boundary = X1 - w - GAP_X;
+        chips.retain(|c| {
+            let on_last = (c.y - Y0) / (H + GAP_Y) == last_row;
+            !on_last || c.x + c.w <= boundary
+        });
+        X1 - w
+    };
+
+    let chip = TagData {
+        label: label.to_string(),
+        x,
+        y: row_y(last_row),
+        w,
+        // -1 = 不是标签，点了要开弹窗而不是搜索
+        idx: -1,
+    };
+    (chips, headers, Some(chip))
+}
+
+/// 「全部标签」弹窗的尺寸与分页参数。**必须和 `ui/app.slint` 里那块的数字一致。**
+///
+/// 面板占屏约 **57%**（1080×940 / 1236×1648）—— 用户要的「半个屏幕」，
+/// 圆角 24px、3px 黑边，居中。
+///
+/// ⚠️ 为什么是「窗」不是新屏：项目规则 ⑨「覆盖优于重排」。开一屏要整屏重画
+///    （墨水屏上就是整屏闪一下），而弹窗只重画面板那一块。
+pub mod popup_layout {
+    /// 面板宽度
+    pub const W: i32 = 1080;
+    /// 面板高度
+    pub const H: i32 = 940;
+    /// 面板左上角
+    pub const X: i32 = (1236 - W) / 2;
+    pub const Y: i32 = (1648 - H) / 2;
+    /// 内容区内边距
+    pub const PAD: i32 = 40;
+    /// 标题栏高度
+    pub const TITLE_H: i32 = 96;
+    /// 底部按钮条高度（只有多页时才用）
+    pub const FOOTER_H: i32 = 116;
+    /// 内容区（相对面板左上角）
+    pub const CONTENT_X: i32 = PAD;
+    pub const CONTENT_Y: i32 = TITLE_H;
+    /// 内容区宽度 —— 标签排版按这个宽度折行
+    pub const CONTENT_W: i32 = W - PAD * 2;
+    /// 一页放几行。
+    ///
+    /// 内容区高 = 940 − 96（标题）− 116（按钮条）− 40（底边距）= 688；
+    /// 每行 66 + 14 = 80 → **8 行**。实测最大的本子（11 角色 + 12 标签）
+    /// 按这个宽度排是 7 行，一页就够。
+    pub const ROWS_PER_PAGE: i32 = 8;
+}
+
+/// 把两组标签排到**「全部标签」弹窗**里，并按页切好。
+///
+/// 返回 `(本页 chips, 本页 headers, 总页数)`；坐标都相对内容区左上角。
+///
+/// `idx` 是**完整列表**里的下标（角色 ++ 标签），和 `tag_texts` 对齐 ——
+/// 弹窗里点和详情页点走的是同一条路。
+fn layout_popup_tags(groups: &[TagGroup], page: usize) -> (Vec<TagData>, Vec<TagHeaderData>, usize) {
+    use popup_layout::*;
+    use tag_layout::{GAP_Y, H as ROW_H, LABEL_W, Y0};
+
+    let (all_chips, all_headers) = lay_out_all_tags(groups, CONTENT_W + 0, 9999);
+
+    // 总行数 = 最后一个 chip（或标题）落在第几行 + 1
+    let total_rows = all_chips
+        .iter()
+        .map(|c| (c.y - Y0) / (ROW_H + GAP_Y) + 1)
+        .chain(
+            all_headers
+                .iter()
+                .map(|h| (h.y - Y0) / (ROW_H + GAP_Y) + 1),
+        )
+        .max()
+        .unwrap_or(1);
+    let pages = ((total_rows + ROWS_PER_PAGE - 1) / ROWS_PER_PAGE).max(1) as usize;
+
+    let page = page.min(pages - 1);
+    let first_row = page as i32 * ROWS_PER_PAGE;
+    let last_row = first_row + ROWS_PER_PAGE; // 不含
+    let shift = first_row * (ROW_H + GAP_Y);
+
+    let in_page = |y: i32| {
+        let row = (y - Y0) / (ROW_H + GAP_Y);
+        row >= first_row && row < last_row
+    };
+
+    let chips: Vec<TagData> = all_chips
+        .into_iter()
+        .filter(|c| in_page(c.y))
+        .map(|c| TagData { y: c.y - shift, ..c })
+        .collect();
+    let headers: Vec<TagHeaderData> = all_headers
+        .into_iter()
+        .filter(|h| in_page(h.y))
+        .map(|h| TagHeaderData { y: h.y - shift, ..h })
+        .collect();
+
+    let _ = LABEL_W;
+    (chips, headers, pages)
 }
 
 /// 测试用：造一条**没人接收**的命令管道。
@@ -5579,6 +5873,116 @@ mod tag_tests {
         }
         for c in &chips {
             assert!(c.label.starts_with("角色"), "不该出现标签：{}", c.label);
+        }
+    }
+
+    /// ⭐ 「详情」格子必须出现在最后一行的末尾，而且不能越界。
+    #[test]
+    fn 详情格子贴最后一行() {
+        let actors = 造(&["甲", "乙"]);
+        let tags = 造(&["丙", "丁", "戊"]);
+        let groups: Vec<TagGroup> = vec![("角色", &actors), ("标签", &tags)];
+        let (chips, _, more) = layout_detail_tags(&groups);
+        let more = more.expect("应该有一个「详情」格子");
+        assert_eq!(more.label, "详情");
+        assert_eq!(more.idx, -1, "idx 必须是 -1（不是真标签）");
+
+        assert!(more.x >= X0 && more.x + more.w <= X1, "「详情」越界了");
+        assert!(more.y >= Y0, "「详情」跑上面去了");
+        let rows = (more.y - Y0) / (H + GAP_Y);
+        assert!(rows < MAX_ROWS, "「详情」排到了第 {rows} 行，超了");
+
+        // 必须在最后一行的同一行上
+        let max_chip_row = chips.iter().map(|c| (c.y - Y0) / (H + GAP_Y)).max().unwrap();
+        assert_eq!(rows, max_chip_row, "「详情」不在最后一行");
+
+        // 而且要和这一行的标签不重叠
+        for c in chips.iter().filter(|c| (c.y - Y0) / (H + GAP_Y) == rows) {
+            assert!(
+                c.x + c.w <= more.x || more.x + more.w <= c.x,
+                "「详情」和「{}」重叠了",
+                c.label
+            );
+        }
+    }
+
+    /// 一个标签都没有时，「详情」也得有合法位置（不能算到负数去）。
+    #[test]
+    fn 详情格子_空列表也安全() {
+        let empty: [String; 0] = [];
+        let groups: Vec<TagGroup> = vec![("角色", &empty), ("标签", &empty)];
+        let (chips, headers, more) = layout_detail_tags(&groups);
+        assert!(chips.is_empty() && headers.is_empty());
+        let more = more.expect("没有标签也该有「详情」");
+        assert!(more.x >= X0 && more.x + more.w <= X1);
+    }
+
+    /// 最后一行被标签占满时，「详情」要么挤进来、要么把挡路的标签让开 ——
+    /// 但**绝不能越界，也绝不能一个标签都不剩**。
+    #[test]
+    fn 详情格子_最后一行满时() {
+        // 长标签，一行只能放两个
+        let long: Vec<String> = (0..6).map(|i| format!("很长的标签名字{i}")).collect();
+        let groups: Vec<TagGroup> = vec![("标签", &long)];
+        let (chips, _, more) = layout_detail_tags(&groups);
+        let more = more.expect("应该有「详情」");
+
+        assert!(more.x + more.w <= X1, "「详情」越界：x={} w={}", more.x, more.w);
+        assert!(!chips.is_empty(), "不该为了放「详情」把标签全删光");
+        for c in &chips {
+            assert!(c.x + c.w <= X1, "标签「{}」越界", c.label);
+        }
+    }
+
+    /// 弹窗：所有标签都要在，一页放不下就分页，页码边界要夹住。
+    #[test]
+    fn 弹窗包含全部标签且分页正确() {
+        // 长标签逼出多页：一页 8 行 × 2~3 个 ≈ 20 个，80 个肯定要翻页
+        let actors: Vec<String> = (0..12).map(|i| format!("角色名字{i}")).collect();
+        let tags: Vec<String> = (0..68).map(|i| format!("标签名字{i}")).collect();
+        let groups: Vec<TagGroup> = vec![("角色", &actors), ("标签", &tags)];
+        let total = actors.len() + tags.len();
+
+        let (chips, _, pages) = layout_popup_tags(&groups, 0);
+        assert!(pages >= 2, "{total} 个标签应该不止一页，实际 {pages} 页");
+        assert!(!chips.is_empty());
+
+        // 逐页收集，总数必须等于 42，而且 idx 覆盖 0..42 不重不漏
+        let mut seen = std::collections::HashSet::new();
+        for p in 0..pages {
+            let (chips, _, _) = layout_popup_tags(&groups, p);
+            for c in chips {
+                assert!(c.idx >= 0 && (c.idx as usize) < actors.len() + tags.len());
+                seen.insert(c.idx);
+                assert!(
+                    c.x + c.w <= popup_layout::CONTENT_W,
+                    "「{}」超宽：x={} w={}",
+                    c.label,
+                    c.x,
+                    c.w
+                );
+                let row = (c.y - tag_layout::Y0) / (tag_layout::H + tag_layout::GAP_Y);
+                assert!(
+                    row < popup_layout::ROWS_PER_PAGE,
+                    "「{}」排到第 {row} 行，超出一页",
+                    c.label
+                );
+            }
+        }
+        assert_eq!(seen.len(), total, "翻完所有页应该看到全部标签");
+    }
+
+    /// 弹窗里所有标签的 idx 必须能和 `tag_texts`（角色 ++ 标签）对上。
+    #[test]
+    fn 弹窗下标对应完整文字表() {
+        let actors = 造(&["真寻"]);
+        let tags = 造(&["萝莉", "中文"]);
+        let groups: Vec<TagGroup> = vec![("角色", &actors), ("标签", &tags)];
+        let (chips, _, _) = layout_popup_tags(&groups, 0);
+
+        let full: Vec<String> = actors.iter().chain(tags.iter()).cloned().collect();
+        for c in chips {
+            assert_eq!(full[c.idx as usize], c.label, "idx 和文字表对不上");
         }
     }
 
@@ -6347,6 +6751,7 @@ fn to_tag_model(tags: &[TagData]) -> slint::ModelRc<TagChip> {
 /// ⚠️ 参数是自己的 `TagHeaderData`，返回值是 Slint 生成的 `TagHeader`——
 ///    两个名字太像，故意在签名里写全，免得以后又搞混。
 fn to_tag_header_model(items: &[TagHeaderData]) -> slint::ModelRc<TagHeader> {
+    // 见下面的实现：参数是自己的 TagHeaderData，返回值是 Slint 生成的 TagHeader。
     let v: Vec<TagHeader> = items
         .iter()
         .map(|h| TagHeader {
@@ -6789,6 +7194,14 @@ fn main() {
         let tx = tx.clone();
         app.on_tag_activated(move |idx| {
             let _ = tx.send(Cmd::TagActivated(idx as usize));
+        });
+    }
+    wire!(on_open_detail_tags, Cmd::OpenDetailTags);
+    wire!(on_close_detail_tags, Cmd::CloseDetailTags);
+    {
+        let tx = tx.clone();
+        app.on_detail_tags_page(move |d| {
+            let _ = tx.send(Cmd::DetailTagsPage(d));
         });
     }
     {

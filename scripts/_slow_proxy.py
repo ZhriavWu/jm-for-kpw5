@@ -5,7 +5,7 @@
 服务端 1 毫秒就答了，根本复现不出卡顿。这个代理在中间加延时，
 让桌面版表现得像真机，从而能验证「加载期间点击还灵不灵」。
 
-用法：python3 _slow_proxy.py <上游端口> <监听端口> [搜索延时秒] [封面延时秒]
+用法：python3 "$(dirname "$0")/_slow_proxy.py" <上游端口> <监听端口> [搜索延时秒] [封面延时秒]
 """
 import http.server
 import socketserver

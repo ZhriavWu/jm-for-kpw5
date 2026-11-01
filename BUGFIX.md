@@ -347,11 +347,11 @@ awk '...' chrome.slint | sed 's|//.*||'
 改完代码按这个顺序跑（全部在 WSL 里）：
 
 ```bash
-bash _force_build.sh        # 编译，并确认真的编了（增量会空转）
-bash _test.sh               # 144 个测试，带 --workspace
+bash scripts/_force_build.sh        # 编译，并确认真的编了（增量会空转）
+bash scripts/_test.sh               # 144 个测试，带 --workspace
 bash check-ui-spec.sh       # 16 条，改界面必跑
 bash check-font-coverage.sh # 加新文字必跑（缺字渲染成空白，不报错）
-bash _gui.sh                # 起桌面版让人看（别自己截图量像素）
+bash scripts/_gui.sh                # 起桌面版让人看（别自己截图量像素）
 ```
 
 **「编译通过 + 测试全过」不等于「功能对」。** 上面 7 条里没有一条是测试

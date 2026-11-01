@@ -268,6 +268,37 @@ else
 fi
 
 echo
+echo "=== 20. 「全部标签」弹窗（详情页末行的「详情」打开）==="
+#
+# 详情页只有三行标签，超出的靠这个弹窗看全。三件事都要在：
+#   1. 详情页有「详情」格子（tag-more）
+#   2. 有弹窗本体（detail-shown 覆盖层，圆角）
+#   3. 弹窗里的标签点了也走 tag-activated（不是死链）
+# ⚠️ 剥注释不能省：下面这段说明里就写着 tag-more / detail-shown。
+ALL2=$(cat *.slint | sed 's|//.*||')
+if echo "$ALL2" | grep -q 'root.tag-more'; then
+  echo "  OK   详情页有「详情」格子"
+else
+  echo "  *** 找不到 tag-more —— 弹窗没有入口"; FAIL=1
+fi
+if echo "$ALL2" | grep -q 'if root.detail-shown : Rectangle'; then
+  echo "  OK   有「全部标签」弹窗覆盖层"
+else
+  echo "  *** 找不到 detail-shown 覆盖层"; FAIL=1
+fi
+if echo "$ALL2" | grep -q 'border-radius: 24px'; then
+  echo "  OK   弹窗是圆角窗口（border-radius: 24px）"
+else
+  echo "  *** 弹窗没有圆角"; FAIL=1
+fi
+DETAILCALL=$(echo "$ALL2" | awk '/if root.detail-shown : Rectangle/,/^    \}$/')
+if echo "$DETAILCALL" | grep -q 'root.tag-activated'; then
+  echo "  OK   弹窗里的标签可点（走 tag-activated）"
+else
+  echo "  *** 弹窗里的标签点不了"; FAIL=1
+fi
+
+echo
 echo "=== 10. 六档灰之外的颜色（规格 2.1）==="
 for f in tokens.slint icons.slint chrome.slint app.slint; do
   H=$(sed 's|//.*||' "$f" | grep -oE '#[0-9a-fA-F]{3,8}' | sort -u \

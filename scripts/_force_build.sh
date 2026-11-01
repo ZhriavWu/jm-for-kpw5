@@ -6,7 +6,7 @@
 # 之后拿旧二进制验了半天，白费工夫。
 set -u
 . "$HOME/.cargo/env"
-cd "$(dirname "$0")" || exit 1
+cd "$(dirname "$0")/.." || exit 1
 export CARGO_TARGET_DIR=/root/target/kindle-manga
 
 touch ui/*.slint build.rs

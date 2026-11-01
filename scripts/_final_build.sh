@@ -1,7 +1,8 @@
 #!/bin/bash
 # 最终验收 + 编译打包。
 set -u
-cd "$(dirname "$0")" || exit 1
+cd "$(dirname "$0")/.." || exit 1
+PROJ=$(cd "$(dirname "$0")/.." && pwd)
 . "$HOME/.cargo/env"
 export CARGO_TARGET_DIR=/root/target/kindle-manga
 
@@ -19,15 +20,15 @@ grep -E '^(error|warning)' /tmp/fb.log | head -10 || true
 
 echo
 echo "################ 2) 全量测试（--workspace）################"
-bash _test.sh 2>&1 | tail -12
+bash "$(dirname "$0")/_test.sh" 2>&1 | tail -12
 
 echo
 echo "################ 3) 规格检查（15 条）################"
-bash check-ui-spec.sh 2>&1 | tail -4
+bash "$PROJ/check-ui-spec.sh" 2>&1 | tail -4
 
 echo
 echo "################ 4) 字体覆盖 ################"
-bash check-font-coverage.sh 2>&1 | tail -3
+bash "$PROJ/check-font-coverage.sh" 2>&1 | tail -3
 
 echo
 echo "################ 5) 真机包：ARM musl 静态 + KUAL 扩展 ################"

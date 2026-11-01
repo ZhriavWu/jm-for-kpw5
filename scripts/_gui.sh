@@ -2,9 +2,9 @@
 # 在 WSLg 的 :0 上起桌面版 GUI，**给用户看排版**。一次性工具，用完可删。
 #
 # 用法：
-#   bash _gui.sh                          # 自动探测服务端（WSL 默认网关）
-#   bash _gui.sh http://192.168.1.91:8001 # 指定服务端
-#   bash _gui.sh http://172.19.48.1:8001 0.75   # 指定缩放
+#   bash scripts/_gui.sh                          # 自动探测服务端（WSL 默认网关）
+#   bash scripts/_gui.sh http://192.168.1.91:8001 # 指定服务端
+#   bash scripts/_gui.sh http://172.19.48.1:8001 0.75   # 指定缩放
 #
 # ⚠️ 缩放**必须给 0.5**（默认就是）：
 #   桌面构建的窗口物理尺寸写死成面板的一半（618×824），
@@ -22,7 +22,7 @@
 # 自己量要写一堆坐标推算，慢且容易量错（这上面反复栽过）。
 set -u
 
-PROJ=$(cd "$(dirname "$0")" && pwd)
+PROJ=$(cd "$(dirname "$0")/.." && pwd)
 
 # 没给服务端就自动探测：Windows 主机在 WSL 眼里是默认网关
 SERVER="${1:-}"
@@ -49,4 +49,4 @@ export SCALE
 pkill -x kindle-manga 2>/dev/null && { echo "已清掉旧实例"; sleep 1; }
 
 cd "$PROJ" || exit 1
-exec bash dev-ui.sh --server "$SERVER"
+exec bash "$PROJ/dev-ui.sh" --server "$SERVER"

@@ -624,6 +624,17 @@ export component AppWindow inherits Window {
     in property <[TagChip]> album-tags: [];
     /// 标签区的小标题（「角色」「标签」）
     in property <[TagHeader]> tag-headers: [];
+    /// 详情页最后一行末尾那个「详情」格子（0 或 1 个）
+    in property <[TagChip]> tag-more: [];
+
+    // ---- 「全部标签」弹窗 ----
+    in property <bool> detail-shown: false;
+    in property <[TagChip]> detail-chips: [];
+    in property <[TagHeader]> detail-headers: [];
+    /// 「第 1 / 2 页」，单页时是空串（不画翻页条）
+    in property <string> detail-page-info: "";
+    in property <bool> detail-has-prev: false;
+    in property <bool> detail-has-next: false;
 
     // ---- 阅读器 ----
     in property <image> page-image;
@@ -720,6 +731,12 @@ export component AppWindow inherits Window {
     callback reader-hint-dismiss();
 
     callback tag-activated(int);
+    /// 点详情页末尾的「详情」
+    callback open-detail-tags();
+    /// 关掉「全部标签」弹窗
+    callback close-detail-tags();
+    /// 弹窗翻页：-1 上一页 / +1 下一页
+    callback detail-tags-page(int);
 
     // ================================================================
     // 0 历史记录（首屏）
@@ -2124,6 +2141,36 @@ export component AppWindow inherits Window {
                     clicked => { root.tag-activated(t.idx); }
                 }
             }
+
+            // ---- 最后一行的「详情」 ----
+            //
+            // 和三行标签同一个坐标系（Rust 算好位置传过来）。
+            // 描边比普通标签粗一点（`border` 而不是 `hairline`），一眼能看出
+            // 「这个是按钮，不是标签」；点了不是搜索，而是打开全部标签弹窗。
+            for t[i] in root.tag-more : Rectangle {
+                x: t.x * 1px;
+                y: t.y * 1px;
+                width: t.w * 1px;
+                height: 66px;
+                background: Tok.paper;
+                border-width: Tok.border;
+                border-color: Tok.ink;
+
+                Text {
+                    text: t.label;
+                    color: Tok.ink;
+                    font-size: 28px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: parent.width;
+                    height: parent.height;
+                    overflow: elide;
+                }
+                TouchArea {
+                    clicked => { root.open-detail-tags(); }
+                }
+            }
         }
 
         // ---- 目录区标题 ----
@@ -2871,6 +2918,209 @@ export component AppWindow inherits Window {
         y: Tok.screen-h - 24px - self.height
             - (root.screen == 8 ? 0px : (Tok.nav-h + Tok.pager-h));
         phase: root.spin-phase;
+    }
+
+    // ================================================================
+    // 「全部标签」弹窗（详情页右下角「详情」打开）
+    //
+    // 详情页的标签区只有三行，超出的会被截断。点最后一行末尾的「详情」
+    // 就把**全部**角色和标签铺在这个圆角窗口里，每个都还能点（点了搜索）。
+    //
+    // 尺寸：1080 × 940，居中 —— 占屏约 57%，用户要的「半个屏幕」。
+    //   圆角 24px + 3px 黑边。墨水屏没有 alpha，所以窗口是**不透明**的：
+    //   不需要遮罩，「黑框 + 纯白」本身就是分层手段（规格第 8 条）。
+    //
+    // ⚠️ 为什么是覆盖层不是新屏：规则 ⑨「覆盖优于重排」。开一屏要整屏重画
+    //    （墨水屏上就是整屏闪一下），弹窗只重画这一块。
+    //
+    // 内容坐标由 Rust 算好（`popup_layout` / `layout_popup_tags`），
+    // 那边和这里的 CONTENT_X/Y 是**同一组数字**，改一处要改另一处。
+    // ================================================================
+    if root.detail-shown : Rectangle {
+        x: 0;
+        y: 0;
+        width: Tok.screen-w;
+        height: Tok.screen-h;
+        background: transparent;
+
+        // 面板
+        Rectangle {
+            x: 78px;
+            y: 354px;
+            width: 1080px;
+            height: 940px;
+            background: Tok.paper;
+            border-width: Tok.border;
+            border-color: Tok.ink;
+            border-radius: 24px;
+
+            // ---- 标题栏 ----
+            Text {
+                x: 40px;
+                y: 0;
+                width: 500px;
+                height: 96px;
+                text: "全部标签";
+                color: Tok.ink;
+                font-size: 44px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+
+            // 关闭按钮：右上角，100×100 手指热区
+            Rectangle {
+                width: 200px;
+                height: 76px;
+                x: parent.width - 40px - self.width;
+                y: (96px - self.height) / 2;
+                background: Tok.paper;
+                border-width: Tok.border;
+                border-color: Tok.ink;
+                border-radius: 12px;
+
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "关闭";
+                    color: Tok.ink;
+                    font-size: 32px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchArea {
+                    clicked => { root.close-detail-tags(); }
+                }
+            }
+
+            // 标题栏下面那条分界线
+            Rectangle {
+                x: 0;
+                y: 96px - Tok.hairline;
+                width: parent.width;
+                height: Tok.hairline;
+                background: Tok.g8;
+            }
+
+            // ---- 内容区（坐标相对这里）----
+            Rectangle {
+                x: 40px;
+                y: 96px;
+                width: parent.width - 80px;
+                height: 700px;
+                background: transparent;
+                clip: true;
+
+                // 分组小标题
+                for h[i] in root.detail-headers : Text {
+                    x: h.x * 1px;
+                    y: h.y * 1px;
+                    width: 84px - 12px;
+                    height: 66px;
+                    text: h.text;
+                    color: Tok.g5;
+                    font-size: 28px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                // 标签本体
+                for t[i] in root.detail-chips : Rectangle {
+                    x: t.x * 1px;
+                    y: t.y * 1px;
+                    width: t.w * 1px;
+                    height: 66px;
+                    background: Tok.paper;
+                    border-width: Tok.hairline;
+                    border-color: Tok.ink;
+
+                    Text {
+                        text: t.label;
+                        color: Tok.ink;
+                        font-size: 28px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: parent.width;
+                        height: parent.height;
+                        overflow: elide;
+                    }
+                    TouchArea {
+                        clicked => { root.tag-activated(t.idx); }
+                    }
+                }
+            }
+
+            // ---- 翻页条（只有多页时才画）----
+            if root.detail-page-info != "" : Rectangle {
+                x: 40px;
+                y: parent.height - 40px - 116px;
+                width: parent.width - 80px;
+                height: 116px;
+                background: transparent;
+
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: 220px;
+                    height: parent.height;
+                    background: Tok.paper;
+                    border-width: Tok.border;
+                    border-color: root.detail-has-prev ? Tok.ink : Tok.g9;
+                    border-radius: 12px;
+
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "上一页";
+                        color: root.detail-has-prev ? Tok.ink : Tok.g9;
+                        font-size: 34px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        enabled: root.detail-has-prev;
+                        clicked => { root.detail-tags-page(-1); }
+                    }
+                }
+
+                Text {
+                    x: 240px;
+                    y: 0;
+                    width: parent.width - 480px;
+                    height: parent.height;
+                    text: root.detail-page-info;
+                    color: Tok.g5;
+                    font-size: 30px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                Rectangle {
+                    width: 220px;
+                    height: parent.height;
+                    x: parent.width - self.width;
+                    y: 0;
+                    background: Tok.paper;
+                    border-width: Tok.border;
+                    border-color: root.detail-has-next ? Tok.ink : Tok.g9;
+                    border-radius: 12px;
+
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "下一页";
+                        color: root.detail-has-next ? Tok.ink : Tok.g9;
+                        font-size: 34px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        enabled: root.detail-has-next;
+                        clicked => { root.detail-tags-page(1); }
+                    }
+                }
+            }
+        }
     }
 
     // ================================================================

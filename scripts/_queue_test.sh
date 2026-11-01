@@ -9,7 +9,7 @@
 #   * 没修好 → 10 秒以上（点击排在搜索后面，等它跑完才被处理）
 set -u
 
-PROJ=$(cd "$(dirname "$0")" && pwd)
+PROJ=$(cd "$(dirname "$0")/.." && pwd)
 OUT=/root/target/kindle-manga/debug
 BIN=$OUT/kindle-manga
 PROXY_PORT=8009
@@ -33,7 +33,7 @@ echo
 echo "===== 2) 起慢代理（search +${SEARCH_DELAY}s，cover +3s）====="
 pkill -f _slow_proxy.py 2>/dev/null
 sleep 0.5
-nohup python3 "$PROJ/_slow_proxy.py" "$GW" 8001 "$PROXY_PORT" "$SEARCH_DELAY" 3 > /tmp/proxy.log 2>&1 &
+nohup python3 "$PROJ/scripts/_slow_proxy.py" "$GW" 8001 "$PROXY_PORT" "$SEARCH_DELAY" 3 > /tmp/proxy.log 2>&1 &
 sleep 1.5
 curl -s -m 5 -o /dev/null "http://127.0.0.1:$PROXY_PORT/api/info" || { echo "!! 代理没起来"; cat /tmp/proxy.log; exit 1; }
 echo "代理就绪"

@@ -10,7 +10,7 @@
 #   物理 = 逻辑 x0.5
 set -u
 
-PROJ=$(cd "$(dirname "$0")" && pwd)
+PROJ=$(cd "$(dirname "$0")/.." && pwd)
 OUT=/root/target/kindle-manga/debug
 BIN=$OUT/kindle-manga
 GW=$(ip route show default | awk '{print $3}')
