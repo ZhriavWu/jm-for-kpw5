@@ -280,14 +280,22 @@ func (s *Server) handlePhoto(w http.ResponseWriter, r *http.Request) {
 	scramble := parseU64(p.ScrambleID)
 	aid := parseU64(p.ID)
 
+	// 正常图片模式下 /img 发的是**已经重排过**的图，所以 seg 必须报 0，
+	// 否则客户端会再解密一次，图又被切乱。
+	normal := s.normal.Load()
+
 	images := make([]map[string]any, 0, len(imgs))
 	for i, im := range imgs {
+		seg := segNum(scramble, aid, im.FileName)
+		if normal {
+			seg = 0
+		}
 		images = append(images, map[string]any{
 			"page":     i,
 			"url":      "/img/" + p.ID + "/" + strconv.Itoa(i),
 			"jpeg_url": "", // 服务端不解码，没有 JPEG 兜底
 			// 服务端直接把分段数算好 —— 客户端不用再猜文件名
-			"seg":      segNum(scramble, aid, im.FileName),
+			"seg":      seg,
 			"filename": im.FileName,
 		})
 	}
@@ -322,7 +330,7 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, imgs, err := s.photoDetail(photoID)
+	p, imgs, err := s.photoDetail(photoID)
 	if err != nil {
 		http.Error(w, "章节不存在："+err.Error(), 502)
 		return
@@ -333,7 +341,14 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// force=jpeg 是老客户端的兼容参数。本地服务端不解码，转不了；
+	// 「正常图片模式」：服务端解密 + 重排 + 重新编码，客户端拿到就是能直接看的图。
+	// 这条路径和下面那条（发原图字节）**互斥**，由设置里的开关决定。
+	if s.normal.Load() {
+		s.serveNormalImage(w, photoID, p, imgs[page])
+		return
+	}
+
+	// force=jpeg 是老客户端的兼容参数。本地服务端不解密、也不转码；
 	// 原图本来就是 JPEG 的话照常发。
 	if force := strings.ToLower(r.URL.Query().Get("force")); (force == "jpeg" || force == "jpg") &&
 		!strings.EqualFold(imgs[page].Suffix, ".jpg") && !strings.EqualFold(imgs[page].Suffix, ".jpeg") {

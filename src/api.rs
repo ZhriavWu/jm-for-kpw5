@@ -57,8 +57,13 @@ const FAST_TIMEOUT: Duration = Duration::from_secs(20);
 /// 参考值来自服务端自己的 `_probe.py`，它用的也是 `timeout=120`。
 const SLOW_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// 取图超时。服务端可能在现下载 + 转码，第一次取某页会明显慢，给宽松些。
-const IMAGE_TIMEOUT: Duration = Duration::from_secs(60);
+/// 取图超时。服务端可能在现下载，第一次取某页会明显慢。
+///
+/// 原来给到 60 秒，再乘 3 次重试 = 最坏 3 分钟停在转圈上 ——
+/// 真机日志里大量「等了 60914ms」就是这么来的。服务端自己单次上游
+/// 下载的超时是 25 秒，这里给 30 秒刚好能把它的错误信息收回来；
+/// 再慢的页大概率也下载不下来了，不如早点让用户看到「重试」。
+const IMAGE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 服务端开起来之后探活等多久。
 pub const DISCOVER_TIMEOUT: Duration = Duration::from_secs(3);
@@ -98,9 +103,21 @@ fn server_error_msg(code: u16, body: &[u8]) -> ApiError {
         // 404 统一当「到头了」处理，调用方不用区分端点
         return ApiError::End;
     }
+    // 两种错误体都要认：
+    //   * JSON（`{"ok":false,"error":"..."}`）—— Python 版服务端
+    //   * 纯文本 —— Go 内置服务端用的是 `http.Error`，写出来就是一段文字。
+    // 只认 JSON 的话，内置服务端的 502 在界面上永远只有「服务端返回 HTTP 502」，
+    // 完全看不出是「下载失败」还是「写缓存失败」。
+    let plain = std::str::from_utf8(body)
+        .ok()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        // 上游的错误串可能很长（带着 URL），界面上放不下，切一段就够定位了。
+        .map(|s| s.chars().take(120).collect::<String>());
     let msg = serde_json::from_slice::<ErrBody>(body)
         .ok()
         .and_then(|b| b.error)
+        .or_else(|| plain.map(|s| s.to_string()))
         .unwrap_or_else(|| format!("服务端返回 HTTP {code}"));
     ApiError::Net(msg)
 }
@@ -375,6 +392,7 @@ fn urlencode(s: &str) -> String {
 enum Method {
     Get,
     Post(&'static str),
+    Delete,
 }
 
 /// 一次 HTTP 往返的结果。
@@ -468,6 +486,7 @@ fn http_request(url: &str, method: Method, body: Option<(&str, &[u8])>, timeout:
 
     let (method_line, extra, payload): (&str, String, &[u8]) = match &method {
         Method::Get => ("GET", String::new(), &[]),
+        Method::Delete => ("DELETE", String::new(), &[]),
         Method::Post(ctype) => (
             "POST",
             format!("Content-Type: {ctype}\r\nContent-Length: {}\r\n", body.map(|(_, b)| b.len()).unwrap_or(0)),
@@ -672,6 +691,180 @@ pub fn set_cache_limit(base: &str, mb: u32) -> Result<CacheStats, ApiError> {
 /// 清空磁盘缓存。
 pub fn clear_cache(base: &str) -> Result<CacheStats, ApiError> {
     cache_request(base, Some(b"{\"clear\":true}".to_vec()))
+}
+
+// ---------------------------------------------------------------- 正常图片模式
+
+/// `/api/mode` 的响应。
+#[derive(Deserialize)]
+struct ModeResp {
+    #[serde(default)]
+    normal: bool,
+}
+
+/// 服务端没有这个接口时统一返回这句，客户端据此把开关标成「本机不支持」。
+pub const MODE_UNSUPPORTED: &str = "服务端不支持正常图片模式";
+
+/// 查服务端当前的「正常图片模式」。
+///
+/// ⚠️ 这里**不能用 `get_json`**：它把 404 统一翻成 `ApiError::End`（「到头了」），
+///    而这里的 404 意思是「这个老服务端没有这个接口」，是完全不同的语义。
+pub fn mode(base: &str) -> Result<bool, ApiError> {
+    let url = join(base, "/api/mode");
+    let resp = http_request(&url, Method::Get, None, FAST_TIMEOUT)?;
+    if resp.status == 404 {
+        return Err(ApiError::Bad(MODE_UNSUPPORTED.into()));
+    }
+    if resp.status >= 400 {
+        return Err(server_error_msg(resp.status, &resp.body));
+    }
+    let r: ModeResp = serde_json::from_slice(&resp.body)
+        .map_err(|e| ApiError::Bad(format!("模式接口返回的不是预期 JSON: {e}")))?;
+    Ok(r.normal)
+}
+
+/// 切换「正常图片模式」，返回服务端确认后的状态。
+pub fn set_mode(base: &str, normal: bool) -> Result<bool, ApiError> {
+    let body = format!("{{\"normal\":{normal}}}").into_bytes();
+    let url = join(base, "/api/mode");
+    let resp = http_request(
+        &url,
+        Method::Post("application/json"),
+        Some(("application/json", &body)),
+        FAST_TIMEOUT,
+    )?;
+    if resp.status == 404 {
+        return Err(ApiError::Bad(MODE_UNSUPPORTED.into()));
+    }
+    if resp.status >= 400 {
+        return Err(server_error_msg(resp.status, &resp.body));
+    }
+    let r: ModeResp = serde_json::from_slice(&resp.body)
+        .map_err(|e| ApiError::Bad(format!("模式接口返回的不是预期 JSON: {e}")))?;
+    Ok(r.normal)
+}
+
+// ---------------------------------------------------------------- 导出（下载正常图）
+
+/// `/api/export` 的任务快照。
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct ExportJob {
+    #[serde(default)]
+    pub running: bool,
+    #[serde(default)]
+    pub finished: bool,
+    #[serde(default)]
+    pub done: i32,
+    #[serde(default)]
+    pub total: i32,
+    #[serde(default)]
+    pub failed: i32,
+    #[serde(default)]
+    pub current: String,
+    #[serde(default)]
+    pub dir: String,
+    #[serde(default)]
+    pub error: String,
+}
+
+impl ExportJob {
+    /// 有没有一个任务正在进行（含刚开始、还没收集完章节的阶段）。
+    pub fn active(&self) -> bool {
+        self.running
+    }
+
+    /// 进度文字：「导出 12/30 · 第3话」，有失败时补一句。
+    pub fn describe(&self) -> String {
+        let mut s = if self.current.is_empty() {
+            format!("导出 {}/{}", self.done, self.total)
+        } else {
+            format!("导出 {}/{} · {}", self.done, self.total, self.current)
+        };
+        if self.failed > 0 {
+            s.push_str(&format!("（{} 页失败）", self.failed));
+        }
+        s
+    }
+
+    /// 结束了但一页都没导出成功 —— 这种情况要给用户一句明确的话。
+    pub fn all_failed(&self) -> bool {
+        self.finished && self.done == 0
+    }
+}
+
+#[derive(Deserialize)]
+struct ExportResp {
+    #[serde(default)]
+    job: ExportJob,
+}
+
+#[derive(Serialize)]
+struct ExportReq<'a> {
+    photo_id: &'a str,
+    album_id: &'a str,
+    scope: &'a str,
+    format: &'a str,
+    /// 本子标题。服务端用它当目录名（它自己拿标题要联网，很慢）。
+    album_title: &'a str,
+}
+
+fn export_json(base: &str, resp: &[u8]) -> Result<ExportJob, ApiError> {
+    let _ = base;
+    serde_json::from_slice::<ExportResp>(resp)
+        .map(|r| r.job)
+        .map_err(|e| ApiError::Bad(format!("导出接口返回的不是预期 JSON: {e}")))
+}
+
+/// 查导出进度。
+pub fn export_status(base: &str) -> Result<ExportJob, ApiError> {
+    let url = join(base, "/api/export");
+    let resp = http_request(&url, Method::Get, None, FAST_TIMEOUT)?;
+    if resp.status >= 400 {
+        return Err(server_error_msg(resp.status, &resp.body));
+    }
+    export_json(base, &resp.body)
+}
+
+/// 开始导出。`scope` = "chapter" / "album"，`format` = "q85" / "lossless"。
+///
+/// `album_title` 只用来给目录起名；给空串服务端会自己兜底。
+pub fn export_start(
+    base: &str,
+    photo_id: &str,
+    album_id: &str,
+    scope: &str,
+    format: &str,
+    album_title: &str,
+) -> Result<ExportJob, ApiError> {
+    let body = serde_json::to_vec(&ExportReq {
+        photo_id,
+        album_id,
+        scope,
+        format,
+        album_title,
+    })
+    .map_err(|e| ApiError::Bad(e.to_string()))?;
+    let url = join(base, "/api/export");
+    let resp = http_request(
+        &url,
+        Method::Post("application/json"),
+        Some(("application/json", &body)),
+        FAST_TIMEOUT,
+    )?;
+    if resp.status >= 400 {
+        return Err(server_error_msg(resp.status, &resp.body));
+    }
+    export_json(base, &resp.body)
+}
+
+/// 取消正在进行的导出。
+pub fn export_cancel(base: &str) -> Result<(), ApiError> {
+    let url = join(base, "/api/export");
+    let resp = http_request(&url, Method::Delete, None, FAST_TIMEOUT)?;
+    if resp.status >= 400 {
+        return Err(server_error_msg(resp.status, &resp.body));
+    }
+    Ok(())
 }
 
 /// 带重试地跑一个请求，返回结果和**实际用掉的尝试次数**。
@@ -905,5 +1098,33 @@ mod tests {
         assert_eq!(urlencode("a b"), "a%20b");
         // unreserved 字符不该被转义
         assert_eq!(urlencode("-_.~"), "-_.~");
+    }
+
+    /// 两种服务端的错误体都要能读出人话。
+    ///
+    /// Python 版回 JSON；Go 内置版用 `http.Error`，回的是**纯文本**。
+    /// 原来只认 JSON，于是内置服务端的 502 在界面上永远只有
+    /// 「服务端返回 HTTP 502」—— 看不出是下载失败还是写缓存失败。
+    #[test]
+    fn 错误体_json_和纯文本都认() {
+        assert_eq!(
+            server_error_msg(
+                502,
+                r#"{"ok":false,"error":"取本子失败：超时"}"#.as_bytes()
+            )
+            .to_string(),
+            "取本子失败：超时"
+        );
+        assert_eq!(
+            server_error_msg(502, "下载失败：connection reset\n".as_bytes()).to_string(),
+            "下载失败：connection reset"
+        );
+        // 空的错误体退回状态码
+        assert_eq!(
+            server_error_msg(500, b"").to_string(),
+            "服务端返回 HTTP 500"
+        );
+        // 404 一律是「到头了」，不是错误
+        assert!(matches!(server_error_msg(404, b""), ApiError::End));
     }
 }

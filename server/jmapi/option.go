@@ -24,11 +24,36 @@ type Option struct {
 type DownloadOptions struct {
 	Image     ImageOptions
 	Threading ThreadingOptions
+
+	// [本地补丁] DownloadPhoto 取章节详情时的两个开关。
+	//
+	// 原来是写死的 `GetPhotoDetail(id, true, true)`，其中：
+	//   FetchAlbum     = true  → 多一次 /album 请求（实测 3~20 秒）
+	//   FetchScrambleID= true  → 只在响应里没带 scramble_id 时才多调一次
+	//                            /chapter_view_template —— 那个接口是 HTML、
+	//                            又慢又拿不到值
+	//
+	// 两个都默认 false：`/chapter` 的响应本来就带 scramble_id，
+	// 而本子详情在调用方那边通常已经有了。真机上这两个 true 会让
+	// 「点一下导出」先卡十几秒。
+	FetchAlbum      bool
+	FetchScrambleID bool
 }
 
 type ImageOptions struct {
 	Decode bool
 	Suffix string
+
+	// [本地补丁] 存 webp 时的编码参数（只对 webp 生效）。
+	//
+	// 上游 `saveImage` 只认 png/gif/jpg，`.webp` 会落进 default 分支
+	// 被编成 **PNG** —— 体积是 webp 的几十倍，而且扩展名对不上。
+	// 这里补上 webp 分支，用 deepteams/webp（纯 Go、零 CGo）。
+	//
+	// WebpQuality  <= 0 时用 85。
+	// WebpLossless = true 时走无损（忽略 WebpQuality，固定 75 的压缩强度）。
+	WebpQuality  float32
+	WebpLossless bool
 }
 
 type ThreadingOptions struct {
@@ -147,6 +172,13 @@ func mergeOptionFromYAML(opt *Option, data []byte) error {
 		if img, ok := asMap(v["image"]); ok {
 			opt.Download.Image.Decode = toBool(img["decode"], opt.Download.Image.Decode)
 			opt.Download.Image.Suffix = toString(img["suffix"], opt.Download.Image.Suffix)
+			// [本地补丁] webp 编码参数
+			opt.Download.Image.WebpLossless = toBool(img["webp_lossless"], opt.Download.Image.WebpLossless)
+			if q, ok := img["webp_quality"]; ok {
+				if f, ok := toFloat32(q); ok {
+					opt.Download.Image.WebpQuality = f
+				}
+			}
 		}
 		if th, ok := asMap(v["threading"]); ok {
 			opt.Download.Threading.Image = toIntWithDefault(th["image"], opt.Download.Threading.Image)
@@ -395,6 +427,26 @@ func toBool(v any, def bool) bool {
 		return b
 	default:
 		return def
+	}
+}
+
+// [本地补丁] 读一个可选的 float32（webp_quality 用）。
+func toFloat32(v any) (float32, bool) {
+	switch t := v.(type) {
+	case float64:
+		return float32(t), true
+	case float32:
+		return t, true
+	case int:
+		return float32(t), true
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(t), 32)
+		if err != nil {
+			return 0, false
+		}
+		return float32(f), true
+	default:
+		return 0, false
 	}
 }
 

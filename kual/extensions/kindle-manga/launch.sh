@@ -363,13 +363,24 @@ else
         # 大于 64 GB 一律当没写（文件被改坏时别变成「不限制」）
         [ "$CACHE_MB" -gt 65536 ] 2>/dev/null && CACHE_MB=1024
 
-        echo "start built-in server: $SRV_BIN (cache max ${CACHE_MB}MB)"
+        # 「正常图片模式」：用户在设置里开的开关，值存在 normal_mode.txt（1/0）。
+        # 启动那一刻读一次，决定 /img 发原图还是发解密重排后的图。
+        # 运行中改的话客户端会走 POST /api/mode 通知本进程。
+        NORMAL_FILE=$(cat "$DIR/normal_mode.txt" 2>/dev/null | tr -d ' \t\r\n')
+        if [ "$NORMAL_FILE" = "1" ]; then
+            NORMAL_FLAG="-normal"
+        else
+            NORMAL_FLAG=""
+        fi
+
+        echo "start built-in server: $SRV_BIN (cache max ${CACHE_MB}MB, normal=${NORMAL_FILE:-0})"
         "$SRV_BIN" \
             -addr 127.0.0.1:8001 \
             -cache /mnt/us/kindle-manga-cache \
             -history "$DIR/history.json" \
             -ready "$SRV_READY" \
             -cache-max-mb "$CACHE_MB" \
+            $NORMAL_FLAG \
             >>"$SRV_LOG" 2>&1 &
         SRV_PID=$!
         echo "server pid=$SRV_PID log=$SRV_LOG"

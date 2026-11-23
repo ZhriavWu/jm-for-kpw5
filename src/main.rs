@@ -52,11 +52,11 @@ mod power;
 #[cfg(any(all(feature = "kindle", target_arch = "arm"), test))]
 mod screensaver;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use render::{PixelBuffer, THUMB_MAX};
 
@@ -170,6 +170,21 @@ const CHAPTERS_PER_PAGE: usize = 12;
 
 /// 原图字节缓存留几页。服务端是现下载+转码的，翻回去时能省一次网络往返。
 const RAW_CACHE_MAX: usize = 6;
+
+/// 取一页图的重试次数。
+///
+/// 原来是 3 次、每次最多 60 秒 —— 最坏 3 分钟都停在转圈上，用户只能干等。
+/// 现在配合更短的超时（见 `api::IMAGE_TIMEOUT`），失败要**尽快**让用户看到，
+/// 而不是把时间耗在不会成功的重试上。
+const PAGE_FETCH_ATTEMPTS: u32 = 2;
+
+/// 封面缩略图缓存上限。
+///
+/// 长会话里翻很多页搜索/历史会一直往里塞，不设上限就是慢性内存泄漏：
+/// 每张 360px 缩略图约 0.5 MB，一百张就是 50 MB —— 在 Kindle 上足够
+/// 把下一次翻页推过内存线。满了就整表清空，和 `raw_cache` 一个策略
+/// （清掉的只是复用机会，屏幕上的图在 `rows` 里，不会消失）。
+const COVER_CACHE_MAX: usize = 32;
 
 /// 键盘三行字母。**和 `ui/app.slint` 里 `kb-row-1/2/3` 的默认值一致** ——
 /// 那边只定义一份、按下的字符也直接从那边回调回来，这里再存一份是为了
@@ -342,6 +357,14 @@ const HINT_FILE: &str = "reader_hint_seen.txt";
 ///      用户运行中改了值，只能靠这条接口同步给已经跑着的进程。
 const CACHE_LIMIT_FILE: &str = "cache_limit.txt";
 
+/// 「正常图片模式」开关。内容 `1` = 开，其它 = 关。
+///
+/// 开：服务端把图**解密重排后再重新编码**成 webp 发过来，客户端拿到直接显示。
+/// 关：服务端发源站原图字节，客户端自己解密（老路径）。
+///
+/// 和 `cache_limit.txt` 一样，`launch.sh` 也读这个文件（见那边的注释）。
+const NORMAL_MODE_FILE: &str = "normal_mode.txt";
+
 /// 缓存上限的默认值：**1 GB**。
 const CACHE_LIMIT_DEFAULT_MB: u32 = 1024;
 
@@ -471,6 +494,23 @@ fn saved_cache_limit_mb() -> u32 {
 fn save_cache_limit_mb(mb: u32) -> Result<(), String> {
     let path = config_path_named(CACHE_LIMIT_FILE).ok_or("找不到程序所在目录")?;
     std::fs::write(&path, mb.to_string())
+        .map_err(|e| format!("写入 {} 失败：{e}", path.display()))
+}
+
+/// 读「正常图片模式」开关。文件内容是 `1`（开）或其它（关）。
+///
+/// ⚠️ **这个文件有两个读者**（同 `cache_limit.txt`）：
+///   1. `launch.sh` 起内置服务端时读它，作为 `-normal` 参数；
+///   2. 客户端自己读它显示开关状态，并在连上后推给服务端（`POST /api/mode`）。
+fn saved_normal_mode() -> bool {
+    std::fs::read_to_string(config_path_named(NORMAL_MODE_FILE).unwrap_or_default())
+        .map(|t| t.trim() == "1")
+        .unwrap_or(false)
+}
+
+fn save_normal_mode(on: bool) -> Result<(), String> {
+    let path = config_path_named(NORMAL_MODE_FILE).ok_or("找不到程序所在目录")?;
+    std::fs::write(&path, if on { "1" } else { "0" })
         .map_err(|e| format!("写入 {} 失败：{e}", path.display()))
 }
 
@@ -955,6 +995,19 @@ struct View {
     reader_starred: bool,
     /// 首次进阅读器的一次性说明
     reader_hint: bool,
+    /// 阅读器里取图失败时的短提示（空串 = 不显示）
+    reader_error: String,
+    /// 设置页「正常图片模式」开关：开/关 + 这一行右侧的文字
+    normal_mode: bool,
+    normal_label: String,
+
+    // ---- 导出（下载正常图）----
+    export_overlay: bool,
+    export_chooser: bool,
+    export_active: bool,
+    export_msg: String,
+    /// 阅读器菜单「下载 / 导出」那一行右侧显示什么
+    reader_download_value: String,
 
     /// 内容版本号。只有真的变了才 +1，UI 侧据此跳过没必要的整屏重绘 ——
     /// 电子墨水刷一次要几百毫秒，能省则省。
@@ -1127,9 +1180,12 @@ enum Cmd {
     ///
     /// 只往缓存里塞，不碰界面 —— 预取的意义就是「等你真翻到那一页时不用等」，
     /// 它自己不该引起任何重绘。
+    ///
+    /// `bytes` 为 `None` = 预取失败。失败也要发一条回来，否则
+    /// 「正在预取」的标记永远清不掉，那一页之后再也预取不了。
     Prefetched {
         key: (String, usize),
-        bytes: Vec<u8>,
+        bytes: Option<Vec<u8>>,
     },
 
     /// **封面取回来了**（另一个线程取完发回来的，不是 UI 点的）。
@@ -1168,6 +1224,32 @@ enum Cmd {
     ReaderStarToggle,
     ReaderExit,
     ReaderHintDismiss,
+    /// 取图失败后，阅读器里那块提示上的「重试」
+    ReaderRetry,
+
+    // 导出（下载正常图，供文件浏览器查看）
+    /// 打开导出面板（阅读器菜单「下载 / 导出」、详情页「下载整本」）
+    ExportOpen,
+    /// 面板里选了第 i 项：0=本话·省空间 1=本话·无损 2=整本·省空间 3=整本·无损
+    ExportPick(i32),
+    /// 后台线程送回的进度/结果
+    ExportTick(api::ExportJob),
+    /// 取消导出
+    ExportCancel,
+    /// 关掉面板但让导出在后台继续
+    ExportBackground,
+    /// 关闭结果面板
+    ExportClose,
+
+    // 正常图片模式
+    /// 设置页那个开关被点了
+    SetToggleNormal,
+    /// 后台线程送回的「服务端确认后的状态」
+    ModeSet {
+        result: Result<bool, String>,
+        /// 要不要在状态栏说一句。连上时同步用的是 false（别每次启动都刷屏）。
+        announce: bool,
+    },
 }
 
 // ---------------------------------------------------------------- 取图（后台线程用）
@@ -1184,6 +1266,20 @@ struct DecodedPage {
     display: PixelBuffer,
     /// 是不是长条漫
     long: bool,
+}
+
+/// 读当前进程的常驻内存（KB）。只有 Linux 有 `/proc`，读不到就返回 `None`。
+///
+/// 放在「缩放偏慢」那条日志里当内存水位。真机上被内核 SIGKILL
+/// （`exit code: 137`）那次，就靠这个数字判断是不是内存顶爆的。
+fn rss_kb() -> Option<u64> {
+    let s = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in s.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            return rest.split_whitespace().next()?.parse().ok();
+        }
+    }
+    None
 }
 
 /// 把已经解出来的**全分辨率**图裁成「能直接上屏的画布」。
@@ -1214,6 +1310,15 @@ fn finish_decode(
     // seg <= 1：不加密（旧版 Python 服务端发的是已解密图），直接整体缩。
     let buf = if seg > 1 {
         descramble::descramble_resize(&full, seg, tw, th)
+    } else if full.w == tw && full.h == th {
+        // 尺寸没变（绝大多数页都在 2.5 M 预算内，`plan_size` 原样返回）：
+        // 直接搬一份进 PixelBuffer。
+        //
+        // 原来这里照样走一遍 `shrink_to`，等于做了一次 1:1 的「重采样」——
+        // 真机上实测要 200~300ms，纯属白烧。搬一份是 memcpy，几毫秒。
+        let mut b = render::PixelBuffer::new(full.w, full.h);
+        b.make_mut_bytes().copy_from_slice(&full.data);
+        b
     } else {
         render::shrink_to(&full, tw, th)
     };
@@ -1239,14 +1344,21 @@ fn finish_decode(
     };
     let scale_ms = t0.elapsed().as_millis();
     if scale_ms > 150 {
+        // 带上常驻内存：下次再出现「被 Killed（exit 137）」时，
+        // 日志里能直接看出是不是内存涨上去被内核收走的。
+        // 桌面预览没有 `/proc`，那时就不写这一段（别写成「RSS 0MB」误导人）。
+        let rss = rss_kb()
+            .map(|k| format!(" RSS {}MB", k / 1024))
+            .unwrap_or_default();
         log::warn!(
-            "缩放偏慢：{}×{} → 画布 {}×{} 用了 {}ms{}",
+            "缩放偏慢：{}×{} → 画布 {}×{} 用了 {}ms{}{}",
             src_w,
             src_h,
             display.width(),
             display.height(),
             scale_ms,
-            if long { "（长条漫）" } else { "" }
+            if long { "（长条漫）" } else { "" },
+            rss
         );
     }
     DecodedPage {
@@ -1272,19 +1384,60 @@ fn decode_page(bytes: Vec<u8>, fit: render::FitMode) -> Result<DecodedPage, Stri
 /// 真机上这几步合起来要几百毫秒到几秒（几百 KB 的传输 + 解码 + 缩放），
 /// 原来全在 worker 上同步做 —— 那就是「翻一页要等好几秒、期间点什么都没反应」
 /// 的来源。
+///
+/// # 两个「保命」参数
+///
+/// * `cached`：`raw_cache` 里已经有这一页的字节就直接用，**不再联网**。
+///   原来的预取把字节下回来却没人读，于是每一页都被下了两遍。
+/// * `live` + `gate`：用户翻走之后，这一页就不值得再解。
+///   解码前用它确认「还是最新的一代」，过期直接返回 `None`；
+///   `gate` 保证同一时刻只有一个线程在解码/缩放，内存峰值不会叠起来。
 fn fetch_and_decode_page(
     base: &str,
     url: &str,
     jpeg_url: &str,
     fit: render::FitMode,
     seg: u32,
-) -> Result<DecodedPage, String> {
-    let bytes = match api::retry(3, || api::fetch_bytes(base, url)).map(|(v, _)| v) {
-        Ok(Some(b)) => b,
-        // 404 = 越界，是正常的翻页边界，不是故障
-        Ok(None) | Err(api::ApiError::End) => return Err("这一页服务端取不到".into()),
-        Err(e) => return Err(format!("取图失败：{e}")),
+    cached: Option<Vec<u8>>,
+    live: &dyn Fn() -> bool,
+    gate: &Mutex<()>,
+) -> Option<Result<DecodedPage, String>> {
+    let bytes = match cached {
+        Some(b) => b,
+        None => {
+            if !live() {
+                return None;
+            }
+            match api::retry(PAGE_FETCH_ATTEMPTS, || api::fetch_bytes(base, url)).map(|(v, _)| v) {
+                Ok(Some(b)) => b,
+                // 404 = 越界，是正常的翻页边界，不是故障
+                Ok(None) | Err(api::ApiError::End) => {
+                    return Some(Err("这一页服务端取不到".into()))
+                }
+                Err(e) => return Some(Err(format!("取图失败：{e}"))),
+            }
+        }
     };
+
+    // 下载这几秒里用户完全可能已经翻走了 —— 别再把 CPU 和内存
+    // 花在一张马上要被丢掉的全分辨率图上。
+    if !live() {
+        return None;
+    }
+
+    let locked = lock_gate(gate);
+    if !live() {
+        return None;
+    }
+    let first_err = match render::decode_full(&bytes) {
+        Ok(full) => {
+            let page = finish_decode(full, bytes, fit, seg);
+            drop(locked);
+            return Some(Ok(page));
+        }
+        Err(e) => e,
+    };
+    drop(locked);
 
     // 原格式解不动时的兜底：让服务端转成 JPEG 再取一次。
     //
@@ -1294,24 +1447,36 @@ fn fetch_and_decode_page(
     //
     // ⚠️ 走兜底时**照样要解密**：服务端转码只是换了容器，横条顺序没动，
     //    seg 原样传进去。
-    let first_err = match render::decode_full(&bytes) {
-        Ok(full) => return Ok(finish_decode(full, bytes, fit, seg)),
-        Err(e) => e,
-    };
     if !jpeg_url.is_empty() {
+        if !live() {
+            return None;
+        }
         if let Some(jb) = api::fetch_bytes(base, jpeg_url).ok().flatten() {
+            let locked = lock_gate(gate);
+            if !live() {
+                return None;
+            }
             if let Ok(full) = render::decode_full(&jb) {
-                return Ok(finish_decode(full, jb, fit, seg));
+                let page = finish_decode(full, jb, fit, seg);
+                drop(locked);
+                return Some(Ok(page));
             }
         }
     }
+
     // 「图太大」这种错误原样透传 —— 它本身就是给用户看的说明，
     // 前面再套一层「解码失败：」反而啰嗦。
-    if first_err.contains("太大") {
+    Some(if first_err.contains("太大") {
         Err(first_err)
     } else {
         Err(format!("解码失败：{first_err}"))
-    }
+    })
+}
+
+/// 拿解码闸门。某个线程 panic 过也不会把后来者全卡死
+/// （release 是 `panic = "abort"`，这里主要是给测试兜底）。
+fn lock_gate(gate: &Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
+    gate.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 // ---------------------------------------------------------------- Worker
@@ -1494,8 +1659,43 @@ struct Worker {
 
     /// 封面缩略图缓存，键是封面 URL。None 表示取过但失败了，不必重试。
     covers: HashMap<String, Option<PixelBuffer>>,
-    /// 原图字节缓存，键是 (章节, 页)。翻页时先看这里。
+    /// 原图字节缓存，键是 (章节, 页)。翻页时**先看这里**，命中就不再联网。
     raw_cache: HashMap<(String, usize), Vec<u8>>,
+    /// 页请求代号。每次 `load_page` +1。
+    ///
+    /// 后台线程在**解码前**比对它：不是最新的一代就直接放弃。
+    /// 这是防止真机被内核 SIGKILL（`exit code: 137`）的关键 ——
+    /// 用户连点几下会有好几个下载线程同时在飞，如果每个都解码，
+    /// 几份全分辨率图叠在一起就顶爆了 Kindle 的内存。
+    page_gen: Arc<AtomicU64>,
+    /// 解码闸门：同一时刻只允许一个线程解码 + 缩放。
+    ///
+    /// 下载可以并行（每张几百 KB），真正吃内存的是解码和缩放，
+    /// 所以只把这一段串起来。最长也就一秒多，用户感知不到。
+    decode_gate: Arc<Mutex<()>>,
+    /// 正在预取的页（章节, 页）。防止同一页被 prefetch 重复请求。
+    prefetching: HashSet<(String, usize)>,
+    /// 最近一次请求、但还没成功上屏的页码。失败后「重试」用它，
+    /// 不能拿 `self.page` —— 那一页还没成功，它仍是上一页。
+    pending_page: Option<usize>,
+    /// 阅读器里那块失败提示的短文案。空串 = 不显示。
+    reader_error: String,
+
+    /// 「正常图片模式」：服务端解密重排后再编码 webp。
+    /// 本地乐观更新（开关立刻响应），连上服务端时会用服务端的真实值校正。
+    normal_mode: bool,
+    /// 服务端支不支持这个开关（老服务端没有 `/api/mode` → false）
+    normal_supported: bool,
+
+    // 导出（下载正常图）
+    /// 面板是否显示
+    export_overlay: bool,
+    /// 面板是否处于「选格式」状态（否则是进度/结果）
+    export_chooser: bool,
+    /// 是否正在导出
+    export_active: bool,
+    /// 进度或结果文字
+    export_msg: String,
 
     /// 把命令送回自己的那条管道（封面线程取好图之后从这儿送回来）。
     ///
@@ -1643,6 +1843,17 @@ impl Worker {
             scroll_mode: false,
             covers: HashMap::new(),
             raw_cache: HashMap::new(),
+            page_gen: Arc::new(AtomicU64::new(0)),
+            decode_gate: Arc::new(Mutex::new(())),
+            prefetching: HashSet::new(),
+            pending_page: None,
+            reader_error: String::new(),
+            normal_mode: saved_normal_mode(),
+            normal_supported: true,
+            export_overlay: false,
+            export_chooser: false,
+            export_active: false,
+            export_msg: String::new(),
             tx,
             list_epoch: 0,
             search_req: None,
@@ -1778,6 +1989,14 @@ impl Worker {
             reader_chapters: self.reader_chapters(),
             reader_starred: self.reader_starred,
             reader_hint: self.reader_hint,
+            reader_error: self.reader_error.clone(),
+            normal_mode: self.normal_mode,
+            normal_label: self.normal_label(),
+            export_overlay: self.export_overlay,
+            export_chooser: self.export_chooser,
+            export_active: self.export_active,
+            export_msg: self.export_msg.clone(),
+            reader_download_value: self.download_value(),
             image_seq: self.image_seq,
             rows_seq: self.rows_seq,
         }
@@ -1977,6 +2196,155 @@ impl Worker {
             let _ = tx.send(Cmd::CacheStatsDone(got));
         });
         self.emit();
+    }
+
+    /// 阅读器菜单「下载 / 导出」那一行右侧的短文字。
+    ///
+    /// `export_msg` 是给面板用的（可能多行、带目录路径），塞进这一行会很难看，
+    /// 所以这里只给一个状态词。
+    fn download_value(&self) -> String {
+        if self.export_active {
+            if self.export_msg.is_empty() {
+                "导出中".to_string()
+            } else {
+                self.export_msg.clone()
+            }
+        } else if self.export_msg.starts_with("导出失败") {
+            "失败".to_string()
+        } else if self.export_msg == "已取消导出" {
+            "已取消".to_string()
+        } else if !self.export_msg.is_empty() {
+            "已完成".to_string()
+        } else {
+            "选择格式".to_string()
+        }
+    }
+
+    /// 设置页「图片格式」那一行右边显示的文字。
+    ///
+    /// 三种状态各自说得清楚：服务端不认 / 开着 / 关着。
+    /// 抽成一个方法是因为 `view()` 和测试都要用，写两份迟早对不上。
+    fn normal_label(&self) -> String {
+        if !self.normal_supported {
+            "本机不支持".to_string()
+        } else if self.normal_mode {
+            "正常图 webp".to_string()
+        } else {
+            "原图 webp".to_string()
+        }
+    }
+
+    /// 设置页「正常图片模式」开关被点了一下。
+    ///
+    /// 先**乐观更新**（开关立刻动，手感才对），后台再向服务端确认；
+    /// 服务端不认（老服务端）就回滚并说明。
+    fn toggle_normal_mode(&mut self) {
+        if !self.normal_supported {
+            self.say("这个服务端不支持正常图片模式");
+            self.emit();
+            return;
+        }
+        let Some(base) = self.base.clone() else {
+            self.say("还没连上服务端");
+            self.emit();
+            return;
+        };
+        let want = !self.normal_mode;
+        self.normal_mode = want;
+        self.say(if want {
+            "正在开启正常图片模式…（每页首次要解压重编码，会慢几秒）"
+        } else {
+            "正在关闭正常图片模式…"
+        });
+        self.emit();
+
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let r = api::set_mode(&base, want).map_err(|e| e.to_string());
+            let _ = tx.send(Cmd::ModeSet {
+                result: r,
+                announce: true,
+            });
+        });
+    }
+
+    /// 连上服务端之后，把本地记住的开关同步过去（以本地为准）。
+    ///
+    /// 先 GET 读一次：既能确认这个服务端支不支持（老服务端 404），
+    /// 也能避免「本来就一致」时白白写一次。
+    fn push_normal_mode(&mut self) {
+        let Some(base) = self.base.clone() else {
+            return;
+        };
+        let want = self.normal_mode;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = match api::mode(&base) {
+                Ok(server_on) if server_on == want => Ok(server_on),
+                Ok(_) => api::set_mode(&base, want).map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(Cmd::ModeSet {
+                result,
+                announce: false,
+            });
+        });
+    }
+
+    /// 服务端确认了模式切换。
+    fn apply_mode(&mut self, result: Result<bool, String>, announce: bool) {
+        match result {
+            Ok(on) => {
+                let changed = on != self.normal_mode;
+                self.normal_mode = on;
+                self.normal_supported = true;
+                if let Err(e) = save_normal_mode(on) {
+                    log::warn!("保存正常图片模式失败：{e}");
+                }
+                if changed {
+                    self.invalidate_images_for_mode();
+                }
+                if announce {
+                    self.say(if on {
+                        "正常图片模式：开（服务端解密并重编码）"
+                    } else {
+                        "正常图片模式：关（原图 + 客户端解密）"
+                    });
+                }
+                self.emit();
+            }
+            Err(e) => {
+                let unsupported = e.contains(api::MODE_UNSUPPORTED);
+                if unsupported {
+                    // 回滚乐观更新：服务端不认这个开关，界面就别显示成已开
+                    self.normal_mode = false;
+                    self.normal_supported = false;
+                    let _ = save_normal_mode(false);
+                    if announce {
+                        self.say("这个服务端不支持正常图片模式");
+                    }
+                } else if announce {
+                    self.say(format!("切换失败：{e}"));
+                }
+                log::warn!("正常图片模式同步失败：{e}");
+                self.emit();
+            }
+        }
+    }
+
+    /// 模式变了 → 之前缓存的字节和画布**含义都变了**（一个解过密、一个没有），
+    /// 必须全部丢掉重新取；否则会拿旧格式的图配新格式的 seg，画面就是花的。
+    fn invalidate_images_for_mode(&mut self) {
+        self.raw_cache.clear();
+        self.prefetching.clear();
+        self.covers.clear();
+        self.page_req = None;
+        self.strip = None;
+        self.display = None;
+        self.reader_error.clear();
+        if self.screen == Screen::Reader {
+            self.load_page(self.page);
+        }
     }
 
     /// 清空服务端磁盘缓存（后台线程，回来走 `CacheStatsDone`）。
@@ -2340,14 +2708,29 @@ impl Worker {
             // 详情页封面（后台线程）回来了
             Cmd::AlbumCoverDone { url, thumb } => self.apply_album_cover(url, thumb),
 
-            // 预取的字节到了：只塞缓存，不碰界面
+            // 预取的字节到了：只塞缓存，**除非用户正好在等这一页**。
             Cmd::Prefetched { key, bytes } => {
+                // 不管成功还是失败，先把「在飞」标记清掉
+                self.prefetching.remove(&key);
                 // 换过章节的话这份就过期了，别往缓存里塞（免得把缓存挤满）
                 if key.0 == self.chapter_key() {
-                    if self.raw_cache.len() >= RAW_CACHE_MAX {
-                        self.raw_cache.clear();
+                    if let Some(b) = bytes {
+                        if self.raw_cache.len() >= RAW_CACHE_MAX {
+                            self.raw_cache.clear();
+                        }
+                        self.raw_cache.insert(key.clone(), b);
                     }
-                    self.raw_cache.insert(key, bytes);
+                    // 用户正好在等这一页（`load_page` 发现预取在飞就等着了）：
+                    // 现在缓存里有了，重新走一遍 load_page —— 它会命中缓存、
+                    // 只解码不再联网。预取失败（bytes 为 None）时也是这样，
+                    // 只不过是退回成一次正常的网络请求。
+                    let waiting = self
+                        .page_req
+                        .as_ref()
+                        .is_some_and(|(k, p, _)| *k == key.0 && *p == key.1);
+                    if waiting {
+                        self.load_page(key.1);
+                    }
                 }
             }
 
@@ -2361,7 +2744,7 @@ impl Worker {
                     return;
                 }
                 // 取失败也记一笔（None），免得每次重建列表都再白试一次
-                self.covers.insert(url, thumb.clone());
+                self.remember_cover(url, thumb.clone());
 
                 let Some(t) = thumb else { return };
                 if let Some(row) = self.rows.get_mut(idx) {
@@ -2461,6 +2844,7 @@ impl Worker {
                 // 内存里的封面 / 原图缓存
                 self.covers.clear();
                 self.raw_cache.clear();
+                self.prefetching.clear();
                 // 磁盘上的也要清 —— 用户点「已用空间」那一行，期望的是
                 // 磁盘真的空出来，而不只是内存里的几张缩略图。
                 self.clear_disk_cache();
@@ -2717,6 +3101,78 @@ impl Worker {
                 self.reader_hint = false;
                 self.emit();
             }
+            Cmd::ReaderRetry => {
+                // 重试的是**失败的那一页**，不是 self.page（那一页还没上屏）。
+                if !self.reader_error.is_empty() {
+                    let page = self.pending_page.unwrap_or(self.page);
+                    log::info!("重试载入第 {} 页", page + 1);
+                    self.load_page(page);
+                }
+            }
+
+            // ---- 导出（下载正常图）----
+            Cmd::ExportOpen => {
+                self.export_overlay = true;
+                if self.export_active {
+                    // 正在跑：直接看进度，别让用户再选一次
+                    self.export_chooser = false;
+                } else {
+                    self.export_chooser = true;
+                    self.export_msg.clear();
+                }
+                self.emit();
+            }
+            Cmd::ExportPick(i) => self.start_export(i),
+            Cmd::ExportTick(job) => {
+                self.export_active = job.active();
+                if job.active() {
+                    self.export_msg = job.describe();
+                } else if job.error == "已取消" {
+                    self.export_msg = "已取消导出".to_string();
+                } else if !job.error.is_empty() {
+                    self.export_msg = format!("导出失败：{}", job.error);
+                } else if job.all_failed() {
+                    self.export_msg = "导出失败：一页都没成功（源站取图失败？）".to_string();
+                } else if job.failed > 0 {
+                    self.export_msg = format!(
+                        "导出完成：{} 页成功，{} 页失败\n已存到：{}",
+                        job.done - job.failed,
+                        job.failed,
+                        pretty_export_dir(&job.dir)
+                    );
+                } else {
+                    self.export_msg = format!(
+                        "导出完成：{} 页\n已存到：{}",
+                        job.done,
+                        pretty_export_dir(&job.dir)
+                    );
+                }
+                self.emit();
+            }
+            Cmd::ExportCancel => {
+                if let Some(base) = self.base.clone() {
+                    self.export_msg = "正在取消…".to_string();
+                    self.emit();
+                    std::thread::spawn(move || {
+                        let _ = api::export_cancel(&base);
+                    });
+                }
+            }
+            Cmd::ExportBackground => {
+                // 面板收起，导出继续（轮询线程还在跑，回来时会更新 export_msg）
+                self.export_overlay = false;
+                self.emit();
+            }
+            Cmd::ExportClose => {
+                self.export_overlay = false;
+                self.export_chooser = false;
+                self.export_msg.clear();
+                self.emit();
+            }
+
+            // ---- 正常图片模式 ----
+            Cmd::SetToggleNormal => self.toggle_normal_mode(),
+            Cmd::ModeSet { result, announce } => self.apply_mode(result, announce),
 
             Cmd::ListPrev => self.list_page(-1),
             Cmd::ListNext => self.list_page(1),
@@ -2869,6 +3325,10 @@ impl Worker {
         // 把本地的缓存上限推给服务端。launch.sh 只在启动那一刻读
         // `cache_limit.txt`，用户运行中改过值的话，进程里还是旧值。
         self.push_cache_limit();
+
+        // 「正常图片模式」同样以本地为准推过去 —— 万一服务端刚重启、
+        // 或者用的是电脑上的老服务端，这里会一次性把状态对齐。
+        self.push_normal_mode();
 
         // 首屏是**历史记录**（规格定的），连上就把它拉出来铺上
         self.screen = Screen::History;
@@ -3910,10 +4370,22 @@ impl Worker {
     }
 
     /// 详情页封面回来了。
+    /// 记一张封面缩略图。**有上限**：长会话里翻很多页会一直往里塞，
+    /// 不封顶就是慢性内存泄漏（每张 360px 缩略图约 0.5 MB）。
+    ///
+    /// 满了整表清空，和 `raw_cache` 一个策略 —— 丢掉的只是「下次不用重下」，
+    /// 已经贴在 `rows` / `album_cover` 上的图不受影响。
+    fn remember_cover(&mut self, url: String, thumb: Option<PixelBuffer>) {
+        if self.covers.len() >= COVER_CACHE_MAX && !self.covers.contains_key(&url) {
+            self.covers.clear();
+        }
+        self.covers.insert(url, thumb);
+    }
+
     fn apply_album_cover(&mut self, url: String, thumb: Option<PixelBuffer>) {
         // 先入缓存 —— 缓存是按 URL 存的，跟「现在在哪个本子」无关，
         // 过期了也留着，下次打开同一个本子能直接命中。
-        self.covers.insert(url.clone(), thumb.clone());
+        self.remember_cover(url.clone(), thumb.clone());
 
         // ⚠️ 取回的过程中用户可能已经打开别的本子了。不是这个本子的封面就丢弃，
         //    否则会重现那个老 bug：「详情页显示的永远是之前看过的某个本子的封面」。
@@ -4104,6 +4576,7 @@ impl Worker {
                 self.photo = Some(p);
                 self.page = 0;
                 self.raw_cache.clear();
+                self.prefetching.clear();
 
                 self.enter_reader();
                 self.loading = true;
@@ -4131,7 +4604,15 @@ impl Worker {
     }
 
     /// 这一页要切成几段（0/1 = 不用解密）。抽成自由函数，方便用测试钉住。
+    ///
+    /// ⚠️ 「正常图片模式」下服务端发来的**已经是重排好的图**，这里必须返回 0。
+    ///    不能只依赖服务端在 `/api/photo` 里报 seg=0 —— 用户可能在打开章节
+    ///    之后才切换模式，那时手里的 `photo.images[].seg` 还是旧值，
+    ///    照它解密就会把好图切乱。
     fn seg_for_page(&self, page: usize) -> u32 {
+        if self.normal_mode {
+            return 0;
+        }
         self.photo.as_ref().map(|p| page_seg(p, page)).unwrap_or(0)
     }
 
@@ -4215,21 +4696,47 @@ impl Worker {
         let key = self.chapter_key();
         let fit = self.fit_mode;
         self.page_req = Some((key.clone(), page, fit));
+        self.pending_page = Some(page);
+        self.reader_error.clear();
 
         // 立刻给反馈：一页要传几百 KB，真机上好几秒。
         self.loading = true;
         self.loading_text = format!("载入第 {} 页…", page + 1);
         self.emit();
 
+        // 新一代：之前还在飞的页请求全部作废。它们下载完之后会看到
+        // 代号已经变了，于是**不进解码**就直接退出 —— 这是防 OOM 的关键。
+        // （放在下面那个「等预取」的提前返回之前：即使这一页在等预取，
+        //  上一页那个已经没用的请求也该立刻作废。）
+        let gen = self.page_gen.fetch_add(1, Ordering::SeqCst) + 1;
+
+        let key_pair = (key.clone(), page);
+
+        // 这一页的预取**正在飞**：等它回来直接解码（见 `Cmd::Prefetched`）。
+        // 千万别再发一遍请求 —— 那正是「同一张图下载两次」的来源。
+        if self.prefetching.contains(&key_pair) && !self.raw_cache.contains_key(&key_pair) {
+            return;
+        }
+
+        // 预取过 / 刚看过这一页 → 直接用缓存里的字节，不再联网。
+        // （原来这一句不存在，所以每一页都要下载两遍：预取一遍、翻页再一遍。）
+        let cached = self.raw_cache.get(&key_pair).cloned();
+
+        let page_gen = Arc::clone(&self.page_gen);
+        let gate = Arc::clone(&self.decode_gate);
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let result = fetch_and_decode_page(&base, &url, &jpeg_url, fit, seg);
-            let _ = tx.send(Cmd::PageReady {
-                key,
-                page,
-                fit,
-                result,
-            });
+            let live = move || page_gen.load(Ordering::SeqCst) == gen;
+            if let Some(result) = fetch_and_decode_page(
+                &base, &url, &jpeg_url, fit, seg, cached, &live, &gate,
+            ) {
+                let _ = tx.send(Cmd::PageReady {
+                    key,
+                    page,
+                    fit,
+                    result,
+                });
+            }
         });
     }
 
@@ -4274,6 +4781,8 @@ impl Worker {
         self.scroll_mode = d.long;
 
         self.loading = false;
+        self.reader_error.clear();
+        self.pending_page = None;
         self.update_reader_status();
         self.image_seq += 1;
         self.emit();
@@ -4302,7 +4811,16 @@ impl Worker {
             Ok(d) => self.apply_page_image(page, d),
             Err(e) => {
                 self.loading = false;
-                self.say(e);
+                // 页面还在，但用户得知道为什么没换页。给一句短文案 + 重试按钮
+                // （见 ui/app.slint 阅读器里的 reader-error 面板）。
+                self.pending_page = Some(page);
+                self.reader_error = if e.contains("太大") {
+                    "这一页太大了".to_string()
+                } else {
+                    "加载失败".to_string()
+                };
+                log::warn!("第 {} 页加载失败：{e}", page + 1);
+                self.say(format!("第 {} 页加载失败：{e}", page + 1));
                 self.emit();
             }
         }
@@ -4331,10 +4849,128 @@ impl Worker {
         if self.raw_cache.contains_key(&key) {
             return;
         }
+        // 同一页已经在飞了就别再发一次 —— 原来这里只查缓存不查「在飞」，
+        // 快速连翻几页就会把同一页重复下载好几遍。
+        if !self.prefetching.insert(key.clone()) {
+            return;
+        }
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            if let Ok(Some(b)) = api::fetch_bytes(&base, &url) {
-                let _ = tx.send(Cmd::Prefetched { key, bytes: b });
+            // 失败也要回报一声，否则 `prefetching` 里那一条永远清不掉。
+            let bytes = api::fetch_bytes(&base, &url).ok().flatten();
+            let _ = tx.send(Cmd::Prefetched { key, bytes });
+        });
+    }
+
+    /// 开始导出。`pick` 见 [`Cmd::ExportPick`]。
+    ///
+    /// ⚠️ 整个流程**在后台线程**上跑：先 POST 启动，再每秒 GET 一次进度，
+    ///    每次把 `ExportTick` 送回 worker。worker 只更新面板，不碰屏幕 ——
+    ///    所以导出期间用户还能继续看漫画。
+    fn start_export(&mut self, pick: i32) {
+        let (scope, format) = match pick {
+            1 => ("chapter", "lossless"),
+            2 => ("album", "q85"),
+            3 => ("album", "lossless"),
+            _ => ("chapter", "q85"),
+        };
+        self.export_chooser = false;
+        self.export_overlay = true;
+
+        let Some(base) = self.base.clone() else {
+            self.export_active = false;
+            self.export_msg = "还没连上服务端".to_string();
+            self.emit();
+            return;
+        };
+
+        // ⚠️ **两种来源分开取**。
+        //
+        // 从详情页点「下载整本」时 `self.photo` 是 None（还没打开任何一话），
+        // 原来这里一律从 photo 取，于是那一刻只会报「当前没有打开的章节」——
+        // 而整本导出本来就不需要一个已经打开的章节。
+        let album_id = self
+            .album
+            .as_ref()
+            .map(|a| a.id.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                self.photo
+                    .as_ref()
+                    .map(|p| {
+                        if p.album_id.is_empty() {
+                            p.id.clone()
+                        } else {
+                            p.album_id.clone()
+                        }
+                    })
+                    .unwrap_or_default()
+            });
+        let photo_id = self.photo.as_ref().map(|p| p.id.clone()).unwrap_or_default();
+
+        // 各取所需：本话导出要 photo，整本导出要 album。
+        let missing = if scope == "album" {
+            album_id.is_empty()
+        } else {
+            photo_id.is_empty()
+        };
+        if missing {
+            self.export_active = false;
+            self.export_msg = if scope == "album" {
+                "还没有打开任何本子".to_string()
+            } else {
+                "当前没有打开的章节".to_string()
+            };
+            self.emit();
+            return;
+        }
+
+        // 本子标题：客户端本来就有，带给服务端当目录名（省得它联网去拿）。
+        let album_title = if self.album_title.is_empty() {
+            self.album
+                .as_ref()
+                .map(|a| a.title.clone())
+                .unwrap_or_default()
+        } else {
+            self.album_title.clone()
+        };
+
+        log::info!("开始导出：scope={scope} format={format} photo={photo_id} album={album_id} title={album_title}");
+        self.export_active = true;
+        self.export_msg = "准备导出…".to_string();
+        self.emit();
+
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            if let Err(e) =
+                api::export_start(&base, &photo_id, &album_id, scope, format, &album_title)
+            {
+                let _ = tx.send(Cmd::ExportTick(api::ExportJob {
+                    finished: true,
+                    error: format!("启动失败：{e}"),
+                    ..Default::default()
+                }));
+                return;
+            }
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+                match api::export_status(&base) {
+                    Ok(job) => {
+                        let running = job.running;
+                        let _ = tx.send(Cmd::ExportTick(job));
+                        if !running {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Cmd::ExportTick(api::ExportJob {
+                            finished: true,
+                            error: format!("查询进度失败：{e}"),
+                            ..Default::default()
+                        }));
+                        break;
+                    }
+                }
             }
         });
     }
@@ -4361,6 +4997,8 @@ impl Worker {
     fn enter_reader(&mut self) {
         self.screen = Screen::Reader;
         self.reader_menu = false;
+        self.reader_error.clear();
+        self.pending_page = None;
         self.reader_starred = self
             .photo
             .as_ref()
@@ -4619,9 +5257,16 @@ impl Worker {
         if from == Screen::Reader {
             self.reader_menu = false;
             self.reader_hint = false;
+            self.reader_error.clear();
+            self.pending_page = None;
+            // 迟到的取图结果不要再上屏
+            self.page_req = None;
             self.display = None;
             self.scroll_mode = false;
             self.strip = None;
+            self.loading = false;
+            // 让还在飞的取图线程在解码前放弃，别为已经离开的页面白烧内存
+            self.page_gen.fetch_add(1, Ordering::SeqCst);
             self.image_seq += 1;
         }
 
@@ -4666,6 +5311,14 @@ fn nav_active(screen: Screen) -> i32 {
 /// 去掉地址里的 `http://`。界面上显示 `IP:端口` 更清爽（规格里就是那么写的）。
 fn strip_scheme(base: &str) -> &str {
     base.strip_prefix("http://").unwrap_or(base)
+}
+
+/// 导出目录在界面上显示成 `kindle-manga-download/...`（去掉 /mnt/us/ 前缀）。
+fn pretty_export_dir(dir: &str) -> String {
+    if dir.is_empty() {
+        return "（见 Kindle 的 kindle-manga-download 目录）".to_string();
+    }
+    dir.trim_start_matches("/mnt/us/").to_string()
 }
 
 /// 列表翻页状态：`(有上一页, 有下一页, 页码文本)`。
@@ -4862,6 +5515,16 @@ fn apply_view(app: &AppWindow, v: &View) {
     app.set_reader_chapters(v.reader_chapters.clone().into());
     app.set_reader_starred(v.reader_starred);
     app.set_reader_hint(v.reader_hint);
+    app.set_reader_error(v.reader_error.clone().into());
+    app.set_normal_mode(v.normal_mode);
+    app.set_normal_label(v.normal_label.clone().into());
+
+    // ---- 导出 ----
+    app.set_export_overlay(v.export_overlay);
+    app.set_export_chooser(v.export_chooser);
+    app.set_export_active(v.export_active);
+    app.set_export_msg(v.export_msg.clone().into());
+    app.set_reader_download_value(v.reader_download_value.clone().into());
 
     // ---- 全部标签弹窗 ----
     app.set_detail_shown(v.detail_shown);
@@ -5719,6 +6382,252 @@ mod async_guard_tests {
         w.apply_page_ready("ch1".into(), 3, render::FitMode::FitHeight, Ok(图));
 
         assert!(w.page_req.is_some(), "适屏方式对不上，该丢弃并保留在飞记录");
+    }
+
+    /// 预取**失败**也要回一条消息，否则「正在预取」的标记永远清不掉，
+    /// 那一页之后再也预取不了（而且 `load_page` 会一直等它）。
+    #[test]
+    fn 预取失败也要清掉在飞标记() {
+        let mut w = 新_w();
+        let key = ("ch1".to_string(), 4usize);
+        w.prefetching.insert(key.clone());
+
+        w.handle(Cmd::Prefetched {
+            key: key.clone(),
+            bytes: None,
+        });
+
+        assert!(
+            !w.prefetching.contains(&key),
+            "失败也要把在飞标记清掉，否则这一页永远没人再预取"
+        );
+        assert!(!w.raw_cache.contains_key(&key), "失败时不该往缓存里塞东西");
+    }
+
+    /// 取图失败后必须留一个能重试的入口，而且记的是**失败的那一页**。
+    ///
+    /// 原来失败只改状态文字，用户只能靠再点一次翻页碰运气；
+    /// 而「重试」如果拿 `self.page`（还没换过去的那一页）就会重试错页。
+    #[test]
+    fn 取图失败后留着重试入口() {
+        let mut w = 新_w();
+        w.screen = Screen::Reader;
+        w.page = 7; // 当前显示的是第 7 页
+        w.loading = true;
+        w.page_req = Some(("ch1".into(), 8, render::FitMode::FitHeight));
+
+        w.apply_page_ready(
+            "ch1".into(),
+            8,
+            render::FitMode::FitHeight,
+            Err("取图失败：服务端返回 HTTP 502".into()),
+        );
+
+        assert!(!w.loading, "失败必须把 loading 关掉，否则转圈一直转");
+        assert_eq!(w.pending_page, Some(8), "重试要重试失败的那一页，不是 self.page");
+        assert!(!w.reader_error.is_empty(), "阅读器里要给出失败提示");
+        assert_eq!(w.page, 7, "失败不该改当前页");
+    }
+
+    /// 「太大」那一页给用户的文案要单独说清楚，别只说「加载失败」。
+    #[test]
+    fn 太大的一页有专门的提示() {
+        let mut w = 新_w();
+        w.page_req = Some(("ch1".into(), 2, render::FitMode::FitHeight));
+        w.apply_page_ready(
+            "ch1".into(),
+            2,
+            render::FitMode::FitHeight,
+            Err("这一页太大了（4000×7000，28.0 兆像素），Kindle 内存放不下".into()),
+        );
+        assert_eq!(w.reader_error, "这一页太大了");
+    }
+
+    /// 离开阅读器要作废还在飞的取图，否则那张全分辨率图会把内存顶上去。
+    #[test]
+    fn 离开阅读器作废在飞取图() {
+        let mut w = 新_w();
+        w.screen = Screen::Reader;
+        w.page_req = Some(("ch1".into(), 9, render::FitMode::FitHeight));
+        w.reader_error = "加载失败".into();
+        let before = w.page_gen.load(Ordering::SeqCst);
+
+        w.back();
+
+        assert_ne!(w.screen, Screen::Reader);
+        assert!(
+            w.page_gen.load(Ordering::SeqCst) > before,
+            "代号必须推进，后台线程才会在解码前放弃"
+        );
+        assert!(w.page_req.is_none(), "迟到的取图结果不能再上屏");
+        assert!(w.reader_error.is_empty(), "离开阅读器要清掉上一屏的失败提示");
+    }
+
+    /// 封面缩略图必须有上限（长会话里一直在涨就是慢性内存泄漏）。
+    #[test]
+    fn 封面缓存有上限() {
+        let mut w = 新_w();
+        for i in 0..(COVER_CACHE_MAX * 3) {
+            w.remember_cover(format!("/cover/{i}"), None);
+            assert!(
+                w.covers.len() <= COVER_CACHE_MAX,
+                "第 {i} 张之后缓存涨到了 {}（上限 {COVER_CACHE_MAX}）",
+                w.covers.len()
+            );
+        }
+    }
+
+    fn 造本子(id: &str) -> api::Album {
+        api::Album {
+            id: id.into(),
+            title: "测试本子".into(),
+            author: String::new(),
+            cover: format!("/cover/{id}"),
+            page_count: 10,
+            chapter_count: 1,
+            tags: Vec::new(),
+            actors: Vec::new(),
+            works: Vec::new(),
+            chapters: Vec::new(),
+        }
+    }
+
+    /// **详情页点「下载整本」不能要求先打开一话。**
+    ///
+    /// 踩过：`start_export` 一律从 `self.photo` 取章节，而详情页里
+    /// `photo` 是 None —— 于是「整本导出」在详情页上永远报
+    /// 「当前没有打开的章节」。
+    #[test]
+    fn 详情页整本导出不要求已打开章节() {
+        let mut w = 新_w();
+        w.base = Some("http://127.0.0.1:1".into()); // 不会真连上，只验状态机
+        w.album = Some(造本子("123"));
+        assert!(w.photo.is_none(), "前提：详情页还没有打开任何一话");
+
+        w.start_export(2); // 整本 · 省空间
+
+        assert!(w.export_overlay, "应当打开面板");
+        assert!(!w.export_chooser, "应当离开选格式");
+        assert!(w.export_active, "应当标记为正在导出");
+        assert_eq!(w.export_msg, "准备导出…", "不该报「没有打开的章节」");
+    }
+
+    /// 反过来：什么都没打开时点整本导出，要给出准确的提示。
+    #[test]
+    fn 没打开本子时整本导出给准确提示() {
+        let mut w = 新_w();
+        w.base = Some("http://127.0.0.1:1".into());
+        w.start_export(2);
+        assert!(!w.export_active);
+        assert_eq!(w.export_msg, "还没有打开任何本子");
+    }
+
+    /// 本话导出只靠 `photo`，和 `album` 无关。
+    #[test]
+    fn 本话导出只依赖当前章节() {
+        let mut w = 新_w();
+        w.base = Some("http://127.0.0.1:1".into());
+        w.photo = Some(api::Photo {
+            id: "777".into(),
+            title: "测试章节".into(),
+            indextitle: String::new(),
+            index: "1".into(),
+            album_id: "888".into(),
+            page_count: 3,
+            page_base: 0,
+            scramble_id: None,
+            images: Vec::new(),
+        });
+        assert!(w.album.is_none(), "前提：只打开了章节，没有本子详情");
+
+        w.start_export(0);
+        assert!(w.export_active);
+        assert_eq!(w.export_msg, "准备导出…");
+    }
+
+    fn 造章节(seg: u32) -> api::Photo {
+        api::Photo {
+            id: "777".into(),
+            title: "测试章节".into(),
+            indextitle: String::new(),
+            index: "1".into(),
+            album_id: "888".into(),
+            page_count: 1,
+            page_base: 0,
+            scramble_id: Some(220980),
+            images: vec![api::ImageRef {
+                page: 0,
+                url: "/img/777/0".into(),
+                jpeg_url: String::new(),
+                seg: Some(seg),
+                filename: "00001".into(),
+            }],
+        }
+    }
+
+    /// **正常图片模式下必须不再解密**。
+    ///
+    /// 服务端此时发来的是已经重排好的图，再按 seg 解一次就又被切乱了。
+    /// 这条尤其重要：用户可能在打开章节**之后**才开开关，那时
+    /// `photo.images[].seg` 还是旧值 —— 所以判据必须在本地。
+    #[test]
+    fn 正常模式下不再解密() {
+        let mut w = 新_w();
+        w.photo = Some(造章节(8));
+
+        w.normal_mode = false;
+        assert_eq!(w.seg_for_page(0), 8, "关模式：按服务端给的 seg 解密");
+
+        w.normal_mode = true;
+        assert_eq!(w.seg_for_page(0), 0, "开模式：服务端已经解密过，这里必须返回 0");
+
+        w.normal_mode = false;
+        assert_eq!(w.seg_for_page(0), 8, "关回去要恢复");
+    }
+
+    /// 切换模式要清掉所有按「旧含义」缓存的图像。
+    #[test]
+    fn 切换模式清掉图像缓存() {
+        let mut w = 新_w();
+        w.screen = Screen::History;
+        w.raw_cache.insert(("ch1".into(), 3), vec![1, 2, 3]);
+        w.prefetching.insert(("ch1".into(), 4));
+        w.covers.insert("/cover/1".into(), None);
+        w.display = Some(PixelBuffer::new(1, 1));
+
+        w.invalidate_images_for_mode();
+
+        assert!(w.raw_cache.is_empty(), "原始字节的含义变了，必须清掉");
+        assert!(w.prefetching.is_empty());
+        assert!(w.covers.is_empty());
+        assert!(w.display.is_none());
+    }
+
+    /// 服务端不支持这个开关时：开关要回滚成「关」，并标成不支持。
+    #[test]
+    fn 服务端不支持时开关回滚() {
+        let mut w = 新_w();
+        w.normal_mode = true; // 乐观更新后的状态
+        w.normal_supported = true;
+
+        w.apply_mode(Err(api::MODE_UNSUPPORTED.to_string()), true);
+
+        assert!(!w.normal_mode, "不能停在一个服务端根本没开的模式上");
+        assert!(!w.normal_supported, "要标成不支持，别再让用户点");
+        assert!(w.normal_label().contains("不支持"));
+    }
+
+    /// 服务端确认开启 → 本地跟上。
+    #[test]
+    fn 服务端确认后本地跟上() {
+        let mut w = 新_w();
+        w.normal_mode = false;
+
+        w.apply_mode(Ok(true), true);
+
+        assert!(w.normal_mode);
+        assert!(w.normal_supported);
+        assert!(w.normal_label().contains("正常图"));
     }
 }
 
@@ -7131,6 +8040,7 @@ fn main() {
     wire!(on_set_edit_server, Cmd::SetEditServer);
     wire!(on_set_recheck, Cmd::SetRecheck);
     wire!(on_set_clear_cache, Cmd::SetClearCache);
+    wire!(on_set_toggle_normal, Cmd::SetToggleNormal);
     wire!(on_page_left, Cmd::PageLeft);
     wire!(on_page_right, Cmd::PageRight);
     wire!(on_open_by_id, Cmd::OpenById);
@@ -7156,8 +8066,22 @@ fn main() {
     wire!(on_reader_star_toggle, Cmd::ReaderStarToggle);
     wire!(on_reader_exit, Cmd::ReaderExit);
     wire!(on_reader_hint_dismiss, Cmd::ReaderHintDismiss);
+    wire!(on_reader_retry, Cmd::ReaderRetry);
+
+    // 导出
+    wire!(on_reader_download, Cmd::ExportOpen);
+    wire!(on_album_download, Cmd::ExportOpen);
+    wire!(on_export_cancel, Cmd::ExportCancel);
+    wire!(on_export_background, Cmd::ExportBackground);
+    wire!(on_export_close, Cmd::ExportClose);
 
     // ---- 带参数的回调 ----
+    {
+        let tx = tx.clone();
+        app.on_export_pick(move |i| {
+            let _ = tx.send(Cmd::ExportPick(i));
+        });
+    }
     {
         let tx = tx.clone();
         app.on_nav_picked(move |i| {

@@ -314,6 +314,182 @@ exit code: 134        （= SIGABRT）
 
 ---
 
+## 11. 真机「卡 / 闪退 / 加载不出来」（2026-11-21，三个独立原因）
+
+用户报了三件事：卡、闪退过几次、有时候加载不出来。查日志发现**这是三条不同的
+原因**，不是同一个 bug。判据是退出码：
+
+| 症状 | 日志证据 | 原因 |
+|---|---|---|
+| 闪退 | `exit code: 137` / `killed by signal 9` | 被 **SIGKILL** 杀（不是 panic；panic 是 134/Aborted） |
+| 卡 | `缩放偏慢` 出现 **3594 次**，中位 844ms | 每页都现场解码 + 缩放，且同一页被下两遍 |
+| 加载不出来 | `取图失败：服务端返回 HTTP 502` 13 次；`等了 60914ms` | 上游 502 + 客户端 60s×3 次重试 |
+
+### 11.1 闪退：并发解码把内存顶爆
+
+`exit code: 137` 和程序自己 panic 完全不是一回事。历史上 6 次 137 全都是
+「用了 44s~1196s 之后无声消失」，且崩溃前的缩放耗时一路涨
+（930 → 1347 → **2191ms**）—— 典型的资源被抢光。
+
+根因是两个「只查缓存、不查在飞」：
+
+* `load_page()` 每次翻页都 `thread::spawn`，**没有并发上限**；
+* `prefetch()` 只查 `raw_cache`，同一页可以重复发；
+* 旧请求虽然靠 `page_req` 身份校验丢弃，但**那是解码完之后才丢** ——
+  图已经解出来、内存已经占了。
+
+连点几下就是好几个线程同时各解码一张全分辨率图（单张 15~35MB，长条漫更高）。
+
+**修法**（三道闸）：
+
+1. `page_gen: Arc<AtomicU64>`：每次 `load_page` +1。后台线程在**下载完**和
+   **解码前**各比对一次，不是最新一代就直接退出 —— 不浪费 CPU，更重要的是
+   **不占内存**。
+2. `decode_gate: Arc<Mutex<()>>`：同一时刻只允许一个线程解码 + 缩放。
+   下载仍可并行（几百 KB 不心疼），吃内存的那一段串起来。
+3. `covers` 加 `COVER_CACHE_MAX = 32`：长会话里封面缩略图只涨不跌是慢性泄漏
+   （每张 360px 约 0.5MB）。
+
+⚠️ 顺带在「缩放偏慢」日志里加了 `RSS` 字段（读 `/proc/self/status`）。
+下次再出现 137，日志里能直接看到内存水位，不用再靠推断。
+
+### 11.2 卡：预取的图根本没人读（每页下载两遍）
+
+`apply_page_image()` 显示完一页就 `prefetch(page+1)`，把下一张图字节塞进
+`raw_cache`。但真正翻到下一页时，`load_page()` **压根不查 `raw_cache`** ——
+读它的 `page_bytes()` 只服务本地模式。于是：
+
+```
+预取下一页 → 下载一遍（存进缓存，没人用）
+翻到下一页 → 又下载一遍
+```
+
+服务端日志坐实了：2817 条慢请求里 **970 条是同一会话内重复请求**同一 URL。
+
+**修法**：
+
+* `load_page` 先查 `raw_cache`，命中就直接进解码，**不再联网**；
+* 预取加 `prefetching: HashSet<(章节, 页)>` 去重；
+* 用户翻到的页正好在预取 → 不重复请求，等 `Cmd::Prefetched` 回来再解码。
+
+顺带砍掉一次白烧的缩放：`plan_size()` 给出目标尺寸后，`finish_decode` 原来
+**无条件**再走一遍 `shrink_to`。绝大多数页本来就在 2.5M 预算内、尺寸没变，
+等于做了一次 1:1 的「重采样」（真机 200~300ms）。现在尺寸相同直接 memcpy。
+
+### 11.3 加载不出来：60 秒超时 × 3 次重试
+
+`api::IMAGE_TIMEOUT` 是 60 秒，`retry(3)` —— 最坏 3 分钟停在转圈上。
+日志里 `等了 60914ms` 就是这个。
+
+**修法**：超时降到 **30 秒**（服务端单次上游下载自己的超时是 25 秒，
+30 秒刚好够把它的错误信息收回来），重试降到 **2 次**（`PAGE_FETCH_ATTEMPTS`）。
+失败时阅读器里给一块「加载失败 / 重试」面板（`Cmd::ReaderRetry`，
+重试的是 `pending_page` 而不是 `self.page` —— 后者还没换过去）。
+
+另外 `server_error_msg()` 现在**同时认 JSON 和纯文本**：Go 内置服务端用的是
+`http.Error`，回的是纯文本，原来只认 JSON，于是 502 在界面上永远只有
+「服务端返回 HTTP 502」，看不出是「下载失败」还是「写缓存失败」。
+
+### 11.4 怎么验证的
+
+* `cargo test --workspace`：**171 个**（客户端 155 + vendored 16，4 个样本测试
+  按设计忽略），零警告；
+* 新增 6 条回归测试钉住这次的修复：预取失败清标记、失败后留重试入口、
+  「太大」单独文案、离开阅读器作废在飞取图、封面缓存上限、
+  错误体 JSON/纯文本都认；
+* `check-ui-spec.sh` 20 条 + `check-font-coverage.sh`（新增了「加载失败」
+  「这一页太大了」「重试」等界面文字）全过；
+* 真机版本：`armv7-unknown-linux-musleabihf` 静态 ARM，12,476,976 字节，
+  SHA256 `98356003…2DB8988`，已覆盖到 `K:\extensions\kindle-manga\kindle-manga`。
+
+⚠️ **这次只换了客户端二进制**（服务端代码没动）。旧版备份在
+`E:\GAME\_backup-kindle-manga-20261121-230623`。
+
+### 11.5 还没做（下一步）
+
+* 服务端 `jmu` 是一把全局锁，搜索慢的时候开新章节要排队（`/api/search`、
+  `/api/album`、`/api/photo` 共用）。要放开得先确认 `jmapi.Client` 的
+  线程安全性，不能盲删。
+* 翻回来仍会重新解码 + 重新缩放（没有「渲染结果缓存」）。如果真机上还有
+  明显卡顿，下一步做「预取的下一页顺手解好存成画布」（约 8MB/页，存 2~3 页）。
+
+---
+
+## 12. 服务端把 Kindle 框架挤到 OOM（2026-11-23，core dump 里挖出来的）
+
+### 症状不是「我们崩了」，是「Kindle 自己崩了」
+
+用户说 Kindle 里有个系统日志。查下去发现 Kindle 根目录躺着
+**两个 145 MB 的 `cvm_*.core`** + 两个 `Indexer_Dump_*.txt`。
+
+`K:\system\logbackup\log_backup_*.txt.gz` 里（Kindle 日志是 **GMT+8**，
+PowerShell 显示的是 UTC，差 8 小时，别搞错）：
+
+```
+23:15:08 pmond: lipc:evts:name=systemMemoryLow
+23:15:51 sh invoked oom-killer: gfp_mask=0x27000c0(GFP_KERNEL_ACCOUNT|__GFP_NOTRACK)
+23:15:52 free:3049 free_pcp:0     ← 只剩 12 MB
+23:15:55 Out of memory: Kill process 23075 (mesquite) score 827
+23:15:54 init.exe: stored main process (23052) terminated with status 137
+23:15:55 init.exe: framework main process (27298) terminated with status 137
+23:16:01 metric=abnormalFrameworkRestart, counter=1
+23:16:10 lab126_gui:restarts=1,max=3:starting lab126_gui
+```
+
+`status 137` = SIGKILL。OOM killer 先杀了 `mesquite`，框架跟着异常重启，
+然后才有了 core dump 和 Indexer_Dump。
+
+### 谁吃的内存：OOM 自己打印的进程表（rss 单位是页 = 4KB）
+
+```
+[25468] kindle-manga-se   total_vm 143774  rss 28122   ← 我们的 Go 服务端 ≈ 110 MB
+[25529] kindle-manga      total_vm  11468  rss  6488   ← Rust 客户端 ≈ 25 MB
+[28025] cvm               total_vm  92902  rss 24952   ← 框架 ≈ 97 MB（被我们 SIGSTOP）
+[28427] KPPMainApp        total_vm 283872  rss  9286   ← 也冻着 ≈ 36 MB
+```
+
+### 根因：三个因素叠加
+
+1. **导出用 3 个并发 worker，每个都「下载 → 解码 → 重排 → 编码」** ——
+   一张全分辨率图解码后 ~9 MB RGBA，加上重排缓冲和 webp 编码器工作区，
+   单张峰值 30~40 MB。三张同时 = 100 MB+。
+2. **那一刻正常图片模式也开着** —— 客户端预取会让多个 `/img` 同时进来，
+   每个又要解一整幅全分辨率图。
+3. **`launch.sh` 用 `killall -STOP` 冻住 cvm / KPPMainApp** ——
+   被 SIGSTOP 的进程**无法响应低内存事件、匿名页也无法回收**，
+   那 ~133 MB 等于钉死在内存里。
+
+三者相加，设备只剩 12 MB，内核就动手了。
+
+> ⚠️ 注意这不是「我们的进程被杀」（那会表现为 exit 137、应用消失），
+> 而是**我们占得太多，把系统里最该活的进程挤死了**。用户感受是
+> 「Kindle 卡一下、界面闪回、KUAL 掉了」，比应用自己崩更莫名其妙。
+
+### 修法（三条）
+
+| 改动 | 效果 |
+|---|---|
+| jmapi：`decodeMu` 串行化解码（**下载仍并发**） | 内存峰值从「N 张」降到「1 张」；网络仍是 3 并发，速度不受影响 |
+| jmapi：`ReleaseMemory` 钩子 → 服务端设成 `debug.FreeOSMemory` | 每张图处理完**立刻把内存还给系统**，不等 Go 慢慢回收 |
+| main.go：`debug.SetMemoryLimit(64MB)` | 超过软上限 GC 更积极，堆不再长期挂在高水位 |
+| 正常图片模式：`normalMu` 同上，一次只处理一张 | 客户端并发预取时也不会同时解多张 |
+
+### 怎么确认的
+
+* x86 实测：**正常图片模式 + 5 个并发 `/img` + 导出同时跑**，
+  进程工作集峰值 **44 MB**（修复前真机上是 ~110 MB）
+* 导出仍是 90/90 全部成功（修复前是 88~89），zip 5642 KB，图片在根目录
+* 服务端 `go build` / `go vet` / `go test` 全过
+
+### 顺带说明
+
+* 那两个 core dump 是 **cvm 崩溃时内核写的**，不是我们的程序。
+  它们各 145 MB，白占 Kindle 空间，可以删。
+* 以后查「Kindle 自己出问题」，先看 `K:\system\logbackup\*.txt.gz`
+  和根目录的 `cvm_*.core`；`K:\kindle-manga-logs` 里只有我们自己的日志。
+
+---
+
 ## 附：两条误判，别重犯
 
 ### 「`fill` 不生效」是错的
@@ -348,8 +524,8 @@ awk '...' chrome.slint | sed 's|//.*||'
 
 ```bash
 bash scripts/_force_build.sh        # 编译，并确认真的编了（增量会空转）
-bash scripts/_test.sh               # 144 个测试，带 --workspace
-bash check-ui-spec.sh       # 16 条，改界面必跑
+bash scripts/_test.sh               # 171 个测试，带 --workspace
+bash check-ui-spec.sh       # 20 条，改界面必跑
 bash check-font-coverage.sh # 加新文字必跑（缺字渲染成空白，不报错）
 bash scripts/_gui.sh                # 起桌面版让人看（别自己截图量像素）
 ```

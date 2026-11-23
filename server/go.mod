@@ -5,6 +5,7 @@ go 1.26.0
 require github.com/laoin114514/jmapi v0.1.5
 
 require (
+	github.com/deepteams/webp v1.2.9 // indirect
 	golang.org/x/image v0.47.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

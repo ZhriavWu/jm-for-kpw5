@@ -37,9 +37,11 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -60,6 +62,17 @@ const (
 	screenH = 1648
 
 	defaultSort = "mr"
+
+	// 服务端自己的内存软上限（字节）。
+	//
+	// 为什么需要：真机上被内核 OOM killer 教训过一次 —— 导出 + 正常图片模式
+	// 同时跑时本进程 RSS 冲到 ~110 MB，那一瞬间系统只剩 12 MB 空闲，
+	// 内核就动手杀了 Kindle 的框架进程（cvm / mesquite），
+	// 设备表现成「框架异常重启」，还留下 145MB 的核心转储。
+	//
+	// 64 MB 对「一次只处理一张图」（峰值约 40MB）足够，同时给系统和
+	// 被我们 SIGSTOP 冻着的框架进程留出余量。
+	memLimitBytes = 64 << 20
 )
 
 // 排序方式和显示名。顺序就是客户端按钮的顺序，**客户端不写死**。
@@ -89,10 +102,24 @@ type Server struct {
 	jcErr   error
 	cache   *Cache
 	hist    *History
+	export  *Exporter
+
+	// 「正常图片模式」：/img 返回**已解密重排并重新编码**的 webp。
+	//
+	// 关掉（默认）时保持老架构：服务端只发原图字节，解密在客户端做。
+	// 开不开由用户在设置里决定，客户端通过 POST /api/mode 通知；
+	// 启动时的初值来自 -normal 参数（launch.sh 从 normal_mode.txt 读）。
+	normal atomic.Bool
 
 	// jmapi 的元数据调用会改 Client 内部的域名等状态，串行化最稳。
 	// 下载图片不经过这里（http.Client 本身是并发安全的）。
 	jmu sync.Mutex
+
+	// 正常图片模式的「解码+重排+编码」锁：同一时刻只处理一张。
+	//
+	// 真机 OOM 的根因之一 —— 客户端预取会让多个 /img 同时进来，
+	// 每个都解一整幅全分辨率图。串起来之后峰值只有一张。
+	normalMu sync.Mutex
 
 	photos  map[string]*photoEntry
 	photoMu sync.Mutex
@@ -122,10 +149,17 @@ func main() {
 	histPath := flag.String("history", envOr("JM_HISTORY", "history.json"), "观看记录文件")
 	readyFile := flag.String("ready", "", "启动成功后写这个文件（给启动脚本判就绪用）")
 	cacheMaxMB := flag.Int("cache-max-mb", 1024, "缓存上限（MB），0 = 不限制")
+	downloadDir := flag.String("download", envOr("JM_DOWNLOAD_DIR", defaultDownloadDir()), "导出正常图的目录")
+	normalMode := flag.Bool("normal", false, "正常图片模式：/img 返回解密重排后的 webp（启动初值）")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags)
-	log.Printf("kindle-manga-server %s 启动：addr=%s cache=%s history=%s", version, *addr, *cacheDir, *histPath)
+
+	// 给 Go 运行时设内存软上限：超过它 GC 会更积极地把内存还给系统。
+	// 真机上不设的话，堆会一直挂在高水位，把 Kindle 逼到 OOM。
+	debug.SetMemoryLimit(memLimitBytes)
+	log.Printf("kindle-manga-server %s 启动：addr=%s cache=%s history=%s 内存软上限=%dMB",
+		version, *addr, *cacheDir, *histPath, memLimitBytes>>20)
 
 	cache, err := NewCache(*cacheDir, int64(*cacheMaxMB)*1024*1024)
 	if err != nil {
@@ -139,10 +173,15 @@ func main() {
 		jcReady: make(chan struct{}),
 		cache:   cache,
 		hist:    NewHistory(*histPath),
+		export:  NewExporter(*downloadDir),
 		photos:  make(map[string]*photoEntry),
 		albums:  make(map[string]*albumEntry),
 		search:  NewSearchCache(),
 		start:   time.Now(),
+	}
+	s.normal.Store(*normalMode)
+	if *normalMode {
+		log.Printf("正常图片模式：开（/img 会解密重排后重新编码 webp）")
 	}
 
 	// 后台把上游客户端准备好。跑完 close(jcReady)，之后所有 handler 正常用。
@@ -208,6 +247,17 @@ func defaultCacheDir() string {
 	return "cache"
 }
 
+// 默认导出目录：和缓存并列、但在 /mnt/us 根下，方便用文件浏览器找。
+// **不放进缓存目录**，否则会被缓存上限清理掉 —— 导出的东西是用户的收藏。
+func defaultDownloadDir() string {
+	if runtime.GOOS == "linux" {
+		if st, err := os.Stat("/mnt/us"); err == nil && st.IsDir() {
+			return "/mnt/us/kindle-manga-download"
+		}
+	}
+	return "download"
+}
+
 // ---------------------------------------------------------------- 路由
 
 func (s *Server) routes() http.Handler {
@@ -222,6 +272,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/prefetch", s.handlePrefetch)
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/cache", s.handleCache)
+	mux.HandleFunc("/api/export", s.handleExport)
+	mux.HandleFunc("/api/mode", s.handleMode)
 	mux.HandleFunc("/img/", s.handleImage)
 	mux.HandleFunc("/cover/", s.handleCover)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -273,9 +325,15 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			"GET  /api/cache               用量统计",
 			"POST /api/cache  {max_mb}     改上限（会立刻清理）",
 			"POST /api/cache  {clear:true} 清空磁盘缓存",
+			"POST /api/export {photo_id|album_id, scope, format}  导出正常图",
+			"GET  /api/export              查询导出进度",
+			"DEL  /api/export              取消导出",
+			"GET  /api/mode                查询正常图片模式",
+			"POST /api/mode {normal:bool}  切换正常图片模式",
 		},
 		"notes": []string{
 			"服务端不解码：/img 发的是源站原图（多半是 webp），解密在客户端",
+			"/api/export 是例外：它解码+解密+重编码，写到下载目录供文件浏览器查看",
 			"/api/photo 的每页带 seg（分割数），客户端据此做横条重排",
 			"页码从 0 开始；越界返回 404",
 			"max_mb = 0 表示不限制；超上限时按最久未访问删除",

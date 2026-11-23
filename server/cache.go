@@ -84,6 +84,16 @@ func (c *Cache) coverPath(albumID string) string {
 	return filepath.Join(c.dir, "_covers", albumID+".jpg")
 }
 
+// normalPath 「正常图片模式」的产物：解密重排并重新编码过的 webp。
+//
+// 和原图缓存**分开放**（`_normal/`），这样开关来回切不会互相污染：
+// 原图那一份永远在，切回普通模式立刻可用。
+//
+// page 是 ImageDetail.Index（**1 基**）。
+func (c *Cache) normalPath(photoID string, page int) string {
+	return filepath.Join(c.dir, "_normal", photoID, pad4(page)+".webp")
+}
+
 func pad4(n int) string {
 	s := strconv.Itoa(n)
 	for len(s) < 4 {
